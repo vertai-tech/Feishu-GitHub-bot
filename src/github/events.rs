@@ -21,6 +21,9 @@ pub struct PullRequestPayload {
 pub struct PullRequest {
     pub html_url: String,
     pub title: String,
+    /// pull_request 对象内的编号（review 事件用；pull_request 事件用顶层 number）
+    #[serde(default)]
+    pub number: u64,
     pub user: User,
     pub base: GitRef,
     pub head: GitRef,
@@ -34,6 +37,60 @@ pub struct PullRequest {
 #[derive(Debug, Deserialize)]
 pub struct Repository {
     pub full_name: String,
+}
+
+/// pull_request_review 事件（审查者提交 review）。
+#[derive(Debug, Deserialize)]
+pub struct ReviewPayload {
+    pub action: String,
+    pub review: Review,
+    pub pull_request: PullRequest,
+    pub repository: Repository,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Review {
+    pub user: User,
+    /// approved / changes_requested / commented
+    #[serde(default)]
+    pub state: String,
+}
+
+/// 审查完成信息，供通知 PR 作者。
+#[derive(Debug, Clone)]
+pub struct ReviewInfo {
+    pub pr: PrInfo,
+    pub reviewer: String,
+    pub state: String,
+}
+
+impl ReviewPayload {
+    /// 仅 action==submitted 时返回。
+    pub fn as_submitted(&self) -> Option<ReviewInfo> {
+        if self.action != "submitted" {
+            return None;
+        }
+        Some(ReviewInfo {
+            pr: PrInfo {
+                repo_full_name: self.repository.full_name.clone(),
+                number: self.pull_request.number,
+                title: self.pull_request.title.clone(),
+                url: self.pull_request.html_url.clone(),
+                author: self.pull_request.user.login.clone(),
+                base_ref: self.pull_request.base.git_ref.clone(),
+                head_ref: self.pull_request.head.git_ref.clone(),
+                merged: self.pull_request.merged,
+                assignees: self
+                    .pull_request
+                    .assignees
+                    .iter()
+                    .map(|u| u.login.clone())
+                    .collect(),
+            },
+            reviewer: self.review.user.login.clone(),
+            state: self.review.state.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]

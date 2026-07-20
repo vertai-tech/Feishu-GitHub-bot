@@ -61,21 +61,4 @@ impl FeishuClient {
         Ok(resp.into_result()?.message_id)
     }
 
-    /// 就地更新一条已发送的交互卡片（PR 状态变化时用）。
-    pub async fn patch_card(&self, message_id: &str, card: &Value) -> anyhow::Result<()> {
-        let token = self.tenant_token().await?;
-        let resp: ApiEnvelope<Value> = self
-            .http
-            .patch(format!("{API_BASE}/im/v1/messages/{message_id}"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({
-                "content": serde_json::to_string(card)?,
-            }))
-            .send()
-            .await?
-            .json()
-            .await?;
-        resp.into_result()?;
-        Ok(())
-    }
 }

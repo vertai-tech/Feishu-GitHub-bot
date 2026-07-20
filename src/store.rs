@@ -79,11 +79,10 @@ pub async fn record_review_task(
 /// PR 跟踪记录的读出结果。
 pub struct PrRecord {
     pub record_id: String,
-    pub message_id: Option<String>,
     pub task_guids: Vec<String>,
 }
 
-/// 读取某 PR 的跟踪记录（含群 message_id 与所有 review 任务 guid）。
+/// 读取某 PR 的跟踪记录（含所有派出的任务 guid）。
 pub async fn get(
     feishu: &FeishuClient,
     app_token: &str,
@@ -95,11 +94,9 @@ pub async fn get(
         Some(r) => r,
         None => return Ok(None),
     };
-    let message_id = rec.fields.get(F_MSG_ID).and_then(field_to_string);
     let task_guids = read_tasks(&rec).into_values().collect();
     Ok(Some(PrRecord {
         record_id: rec.record_id,
-        message_id,
         task_guids,
     }))
 }
