@@ -152,7 +152,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = issue_card(&issue, IssueCardStatus::Opened);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, Some("assign"), true,
+                &issue.assignees, &card, Some("assign"), false,
             )
             .await;
             for login in &issue.assignees {
@@ -233,7 +233,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             let card = pr_card(&pr, PrCardStatus::Open, "您有一条 Pull Request 待处理");
             deliver_to_assignees(
                 state, &pr.repo_full_name, pr.number, true, "受理人",
-                &pr.assignees, &card, Some("assign"), true,
+                &pr.assignees, &card, Some("assign"), false,
             )
             .await;
             for login in &pr.assignees {
@@ -252,6 +252,28 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
         }
         PrEvent::ReviewRequested { pr, reviewer_login } => {
             handle_review_requested(state, &pr, &reviewer_login).await?;
+        }
+        PrEvent::ReadyForReview(pr) => {
+            // 草案转正式：通知受理人待处理，并（重新）开始 SLA 计时。
+            let card = pr_card(&pr, PrCardStatus::Open, "Pull Request 已就绪（草案转正式），待处理");
+            deliver_to_assignees(
+                state, &pr.repo_full_name, pr.number, true, "受理人",
+                &pr.assignees, &card, Some("ready"), false,
+            )
+            .await;
+            for login in &pr.assignees {
+                track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, login, "受理人").await;
+            }
+        }
+        PrEvent::ConvertedToDraft(pr) => {
+            // 转为草案：通知受理人暂缓，并暂停 SLA 计时（标记 done）。
+            store::mark_all_done(state, &pr.repo_full_name, pr.number).await;
+            let card = pr_card(&pr, PrCardStatus::Closed, "Pull Request 已转为草案，暂缓处理");
+            deliver_to_assignees(
+                state, &pr.repo_full_name, pr.number, true, "受理人",
+                &pr.assignees, &card, None, false,
+            )
+            .await;
         }
         PrEvent::Closed(pr) => {
             handle_closed(state, &pr).await?;
