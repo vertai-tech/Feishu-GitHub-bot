@@ -200,7 +200,7 @@ async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Resul
             info!("PR 作者评论自己的 PR，跳过：{}#{}", c.repo_full_name, c.issue_number);
             return Ok(());
         }
-        let card = comment_card(&c, "PR 新评论", "您的 PR 有新评论");
+        let card = comment_card(&c, "Pull Request 新评论", "您的 Pull Request 有新评论");
         deliver_to_assignees(
             state, &c.repo_full_name, c.issue_number, true, "创建者",
             std::slice::from_ref(&c.author), &card, None, None, false,
@@ -237,9 +237,9 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
                 &pr.repo_full_name, pr.number, &pr.title, "",
             )
             .await?;
-            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 PR 待处理");
+            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 Pull Request 待处理");
             let task = Some((
-                format!("处理 PR #{}: {}", pr.number, pr.title),
+                format!("处理 Pull Request #{}: {}", pr.number, pr.title),
                 format!("{}\n{}", pr.repo_full_name, pr.url),
             ));
             deliver_to_assignees(
@@ -250,9 +250,9 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             info!("PR opened 处理完成：{}", store::pr_key(&pr.repo_full_name, pr.number));
         }
         PrEvent::Assigned { pr, assignee_login } => {
-            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 PR 待处理");
+            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 Pull Request 待处理");
             let task = Some((
-                format!("处理 PR #{}: {}", pr.number, pr.title),
+                format!("处理 Pull Request #{}: {}", pr.number, pr.title),
                 format!("{}\n{}", pr.repo_full_name, pr.url),
             ));
             deliver_to_assignees(
@@ -291,7 +291,7 @@ async fn deliver_to_assignees(
     admin_fallback: bool,
 ) {
     let cfg = &state.cfg.feishu;
-    let label = if is_pr { "PR" } else { "Issue" };
+    let label = if is_pr { "Pull Request" } else { "Issue" };
 
     // 无收件人 → 视需要回退给管理员（带显著"管理员通知"标识）。
     if assignees.is_empty() {
@@ -401,7 +401,7 @@ async fn handle_review_requested(
     let Some(open_id) = open_id else {
         // 未绑定：群里提示，仍不报错。
         let hint = format!(
-            "GitHub 用户 `{reviewer_login}` 被请求 review PR #{num}（{repo}），但还没绑定飞书账号，无法派任务。请该同学私聊我完成绑定。",
+            "GitHub 用户 `{reviewer_login}` 被请求 review Pull Request #{num}（{repo}），但还没绑定飞书账号，无法派任务。请该同学私聊我完成绑定。",
             num = pr.number,
             repo = pr.repo_full_name,
         );
@@ -413,7 +413,7 @@ async fn handle_review_requested(
         return Ok(());
     };
 
-    let summary = format!("Review PR #{}: {}", pr.number, pr.title);
+    let summary = format!("Review Pull Request #{}: {}", pr.number, pr.title);
     let description = format!("{}\n{}", pr.repo_full_name, pr.url);
     let task_guid = state
         .feishu
@@ -421,7 +421,7 @@ async fn handle_review_requested(
         .await?;
 
     // 私聊推一张卡片。
-    let card = pr_card(pr, PrCardStatus::Open, "您有一条 PR 待 Review");
+    let card = pr_card(pr, PrCardStatus::Open, "您有一条 Pull Request 待 Review");
     if let Err(e) = state.feishu.send_card("open_id", &open_id, &card).await {
         warn!("私聊 reviewer 卡片失败（任务已建）: {e:#}");
     }
@@ -443,9 +443,9 @@ async fn handle_review_requested(
 async fn handle_closed(state: &AppState, pr: &PrInfo) -> anyhow::Result<()> {
     let cfg = &state.cfg.feishu;
     let (status, lead) = if pr.merged {
-        (PrCardStatus::Merged, "您跟进的 PR 已合并")
+        (PrCardStatus::Merged, "您跟进的 Pull Request 已合并")
     } else {
-        (PrCardStatus::Closed, "您跟进的 PR 已关闭")
+        (PrCardStatus::Closed, "您跟进的 Pull Request 已关闭")
     };
     let status_str = if pr.merged { "merged" } else { "closed" };
 
@@ -475,7 +475,7 @@ async fn handle_closed(state: &AppState, pr: &PrInfo) -> anyhow::Result<()> {
     }
 
     // 通知 PR 作者：已合并/关闭。
-    let author_lead = if pr.merged { "您的 PR 已合并" } else { "您的 PR 已关闭" };
+    let author_lead = if pr.merged { "您的 Pull Request 已合并" } else { "您的 Pull Request 已关闭" };
     let author_card = pr_card(pr, status, author_lead);
     deliver_to_assignees(
         state, &pr.repo_full_name, pr.number, true, "创建者",

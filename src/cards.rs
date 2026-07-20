@@ -103,8 +103,8 @@ impl PrCardStatus {
         // (模板色, 头部标题)
         match self {
             PrCardStatus::Open => ("blue", "Pull Request"),
-            PrCardStatus::Merged => ("green", "PR 已合并"),
-            PrCardStatus::Closed => ("grey", "PR 已关闭"),
+            PrCardStatus::Merged => ("green", "Pull Request 已合并"),
+            PrCardStatus::Closed => ("grey", "Pull Request 已关闭"),
         }
     }
 }
@@ -126,9 +126,9 @@ pub fn pr_card(pr: &PrInfo, status: PrCardStatus, lead: &str) -> Value {
             "tag": "div",
             "text": { "tag": "lark_md", "content": format!("**分支**　`{}` → `{}`", pr.head_ref, pr.base_ref) }
         })],
-        "查看 PR",
+        "查看 Pull Request",
         &pr.url,
-        task_value(&format!("PR #{}", pr.number), &pr.repo_full_name, &pr.title, &pr.url),
+        task_value(&format!("Pull Request #{}", pr.number), &pr.repo_full_name, &pr.title, &pr.url),
         "来自 GitHub · 点按钮查看详情",
     )
 }
@@ -186,7 +186,7 @@ pub fn comment_card(c: &CommentInfo, header: &str, lead: &str) -> Value {
         .map(|l| format!("> {l}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let kind = if c.is_pr { "PR" } else { "Issue" };
+    let kind = if c.is_pr { "Pull Request" } else { "Issue" };
     notification_card(
         "blue",
         header,
@@ -217,8 +217,8 @@ pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
     };
     notification_card(
         "green",
-        "PR 审查完成",
-        "您的 PR 审查已完成",
+        "Pull Request 审查完成",
+        "您的 Pull Request 审查已完成",
         &format!("**#{} {}**", pr.number, pr.title),
         vec![
             short_field("仓库", &format!("`{}`", pr.repo_full_name)),
@@ -226,9 +226,9 @@ pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
             short_field("结论", state_text),
         ],
         vec![],
-        "查看 PR",
+        "查看 Pull Request",
         &pr.url,
-        task_value(&format!("PR #{}", pr.number), &pr.repo_full_name, &pr.title, &pr.url),
+        task_value(&format!("Pull Request #{}", pr.number), &pr.repo_full_name, &pr.title, &pr.url),
         "来自 GitHub · 点按钮查看详情",
     )
 }
