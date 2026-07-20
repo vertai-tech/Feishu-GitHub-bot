@@ -17,8 +17,8 @@ notify_id = "on_xxxxxxxx"
 base_app_token = "bascnxxxxxxxx"
 # 「绑定映射」表 table_id（形如 tblxxxx）
 binding_table_id = "tblxxxxxxxx"
-# 「PR跟踪」表 table_id
-pr_table_id = "tblyyyyyyyy"
+# 「待办跟踪」表 table_id（SLA 未处理提醒）
+sla_table_id = "tblyyyyyyyy"
 
 [github]
 # webhook secret，与 GitHub org/仓库 webhook 设置里的 Secret 一致。可用 GITHUB_WEBHOOK_SECRET 覆盖

@@ -22,12 +22,25 @@ struct CreateResp {
 }
 
 impl FeishuClient {
-    /// 按某个文本字段精确匹配检索记录。
+    /// 按某个文本字段精确匹配检索记录（operator="is"）。
     pub async fn bitable_search(
         &self,
         app_token: &str,
         table_id: &str,
         field_name: &str,
+        value: &str,
+    ) -> anyhow::Result<Vec<Record>> {
+        self.bitable_search_op(app_token, table_id, field_name, "is", value)
+            .await
+    }
+
+    /// 按某个文本字段 + 指定 operator（is / contains 等）检索记录（最多 500 条）。
+    pub async fn bitable_search_op(
+        &self,
+        app_token: &str,
+        table_id: &str,
+        field_name: &str,
+        operator: &str,
         value: &str,
     ) -> anyhow::Result<Vec<Record>> {
         let token = self.tenant_token().await?;
@@ -36,13 +49,14 @@ impl FeishuClient {
             .post(format!(
                 "{API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
             ))
+            .query(&[("page_size", "500")])
             .bearer_auth(&token)
             .json(&serde_json::json!({
                 "filter": {
                     "conjunction": "and",
                     "conditions": [{
                         "field_name": field_name,
-                        "operator": "is",
+                        "operator": operator,
                         "value": [value],
                     }],
                 },

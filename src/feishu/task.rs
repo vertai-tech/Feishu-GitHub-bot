@@ -40,24 +40,4 @@ impl FeishuClient {
             .await?;
         Ok(resp.into_result()?.task.guid)
     }
-
-    /// 把任务标记为完成（PR 合并/关闭时收尾）。
-    pub async fn complete_task(&self, task_guid: &str) -> anyhow::Result<()> {
-        let token = self.tenant_token().await?;
-        let now_ms = chrono::Utc::now().timestamp_millis().to_string();
-        let resp: ApiEnvelope<serde_json::Value> = self
-            .http
-            .patch(format!("{API_BASE}/task/v2/tasks/{task_guid}"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({
-                "task": { "completed_at": now_ms },
-                "update_fields": ["completed_at"],
-            }))
-            .send()
-            .await?
-            .json()
-            .await?;
-        resp.into_result()?;
-        Ok(())
-    }
 }

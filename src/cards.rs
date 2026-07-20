@@ -233,6 +233,27 @@ pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
     )
 }
 
+/// SLA 未处理提醒卡片（私聊负责人）。kind 为 "pr" / "issue"。
+pub fn sla_reminder_card(kind: &str, number: u64, title: &str, url: &str, role: &str) -> Value {
+    let is_pr = kind == "pr";
+    let type_name = if is_pr { "Pull Request" } else { "Issue" };
+    notification_card(
+        "red",
+        "待处理提醒",
+        &format!("您有一个 {type_name} 在一小时内未处理，请及时处理"),
+        &format!("**#{number} {title}**"),
+        vec![
+            short_field("类型", type_name),
+            short_field("你的角色", role),
+        ],
+        vec![],
+        &format!("查看 {type_name}"),
+        url,
+        task_value(&format!("{type_name} #{number}"), "", title, url),
+        "来自 GitHub · 超时未处理提醒",
+    )
+}
+
 /// 把一张通知卡片包装成「管理员回退通知」：变红色头、加显著标识，
 /// 让管理员一眼知道是"无人受理才抄送给你知悉"，而非指派给你。
 pub fn to_admin_notice(card: &Value) -> Value {

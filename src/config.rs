@@ -30,8 +30,8 @@ pub struct FeishuConfig {
     pub base_app_token: String,
     /// 绑定映射表 table_id
     pub binding_table_id: String,
-    /// PR 跟踪表 table_id
-    pub pr_table_id: String,
+    /// SLA「待办跟踪」表 table_id
+    pub sla_table_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
