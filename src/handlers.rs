@@ -156,7 +156,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             ));
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, task, Some("assign"),
+                &issue.assignees, &card, task, Some("assign"), true,
             )
             .await;
         }
@@ -168,7 +168,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             ));
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                std::slice::from_ref(&assignee_login), &card, task, Some("assign"),
+                std::slice::from_ref(&assignee_login), &card, task, Some("assign"), true,
             )
             .await;
         }
@@ -176,7 +176,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = issue_card(&issue, IssueCardStatus::Closed);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, None, None,
+                &issue.assignees, &card, None, None, false,
             )
             .await;
         }
@@ -184,7 +184,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = issue_card(&issue, IssueCardStatus::Reopened);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, None, None,
+                &issue.assignees, &card, None, None, false,
             )
             .await;
         }
@@ -195,19 +195,31 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
 
 async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Result<()> {
     if c.is_pr {
-        // PR 评论 → 通知 PR 作者本人。
+        // PR 评论 → 通知 PR 作者本人；作者评论自己的 PR 则跳过。
+        if c.commenter == c.author {
+            info!("PR 作者评论自己的 PR，跳过：{}#{}", c.repo_full_name, c.issue_number);
+            return Ok(());
+        }
         let card = comment_card(&c, "PR 新评论", "您的 PR 有新评论");
         deliver_to_assignees(
             state, &c.repo_full_name, c.issue_number, true, "创建者",
-            std::slice::from_ref(&c.author), &card, None, None,
+            std::slice::from_ref(&c.author), &card, None, None, false,
         )
         .await;
     } else {
-        // Issue 评论 → 通知受理人。
+        // Issue 评论 → 通知受理人（排除评论人本人）。
+        let recipients: Vec<String> = c
+            .assignees
+            .iter()
+            .filter(|a| **a != c.commenter)
+            .cloned()
+            .collect();
+        // 仅在本就无受理人时才回退管理员；受理人恰好是评论人则不回退（有人在跟进）。
+        let admin_fb = c.assignees.is_empty();
         let card = comment_card(&c, "Issue 新评论", "您受理的 Issue 有一条新评论待处理");
         deliver_to_assignees(
             state, &c.repo_full_name, c.issue_number, false, "受理人",
-            &c.assignees, &card, None, None,
+            &recipients, &card, None, None, admin_fb,
         )
         .await;
     }
@@ -232,7 +244,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             ));
             deliver_to_assignees(
                 state, &pr.repo_full_name, pr.number, true, "受理人",
-                &pr.assignees, &card, task, Some("assign"),
+                &pr.assignees, &card, task, Some("assign"), true,
             )
             .await;
             info!("PR opened 处理完成：{}", store::pr_key(&pr.repo_full_name, pr.number));
@@ -245,7 +257,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             ));
             deliver_to_assignees(
                 state, &pr.repo_full_name, pr.number, true, "受理人",
-                std::slice::from_ref(&assignee_login), &card, task, Some("assign"),
+                std::slice::from_ref(&assignee_login), &card, task, Some("assign"), true,
             )
             .await;
         }
@@ -265,6 +277,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
 /// - 受理人未绑定 / 发送失败 → 回退提示管理员；
 /// - task=Some 时给绑定的受理人建任务（is_pr 时把 guid 记入 PR 跟踪表）；
 /// - dedup_kind=Some 时按 (item+受理人+kind) 去重（opened 与 assigned 不重复）。
+#[allow(clippy::too_many_arguments)]
 async fn deliver_to_assignees(
     state: &AppState,
     repo: &str,
@@ -275,18 +288,22 @@ async fn deliver_to_assignees(
     card: &serde_json::Value,
     task: Option<(String, String)>,
     dedup_kind: Option<&str>,
+    admin_fallback: bool,
 ) {
     let cfg = &state.cfg.feishu;
     let label = if is_pr { "PR" } else { "Issue" };
 
-    // 无收件人 → 回退给管理员。
+    // 无收件人 → 视需要回退给管理员（带显著"管理员通知"标识）。
     if assignees.is_empty() {
-        if let Err(e) = state
-            .feishu
-            .send_card(&cfg.notify_id_type, &cfg.notify_id, card)
-            .await
-        {
-            error!("回退通知管理员失败: {e:#}");
+        if admin_fallback {
+            let notice = crate::cards::to_admin_notice(card);
+            if let Err(e) = state
+                .feishu
+                .send_card(&cfg.notify_id_type, &cfg.notify_id, &notice)
+                .await
+            {
+                error!("回退通知管理员失败: {e:#}");
+            }
         }
         return;
     }
@@ -357,6 +374,7 @@ async fn handle_review_submitted(state: &AppState, review: ReviewInfo) -> anyhow
         &card,
         None,
         None,
+        false,
     )
     .await;
     info!(
@@ -461,15 +479,21 @@ async fn handle_closed(state: &AppState, pr: &PrInfo) -> anyhow::Result<()> {
     let author_card = pr_card(pr, status, author_lead);
     deliver_to_assignees(
         state, &pr.repo_full_name, pr.number, true, "创建者",
-        std::slice::from_ref(&pr.author), &author_card, None, None,
+        std::slice::from_ref(&pr.author), &author_card, None, None, false,
     )
     .await;
 
-    // 通知受理人：跟进的 PR 已合并/关闭（作者也是受理人时可能重复，可接受）。
+    // 通知受理人（排除作者，避免作者=受理人时重复通知）：跟进的 PR 已合并/关闭。
+    let others: Vec<String> = pr
+        .assignees
+        .iter()
+        .filter(|a| **a != pr.author)
+        .cloned()
+        .collect();
     let card = pr_card(pr, status, lead);
     deliver_to_assignees(
         state, &pr.repo_full_name, pr.number, true, "受理人",
-        &pr.assignees, &card, None, None,
+        &others, &card, None, None, false,
     )
     .await;
     info!("PR {} 收尾完成（{status_str}）", store::pr_key(&pr.repo_full_name, pr.number));
