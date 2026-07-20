@@ -1,0 +1,6 @@
+/target
+
+# 含密钥的实际配置，不要提交
+config.toml
+*.env
+.env

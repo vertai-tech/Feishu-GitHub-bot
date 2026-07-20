@@ -1,0 +1,14 @@
+services:
+  feishu-github-bot:
+    image: feishu-github-bot:latest
+    container_name: feishu-github-bot
+    restart: unless-stopped
+    env_file: ./secrets.env
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+    networks:
+      - bark_default   # 与 caddy 同网络，caddy 按容器名反代 feishu-github-bot:8080
+
+networks:
+  bark_default:
+    external: true
