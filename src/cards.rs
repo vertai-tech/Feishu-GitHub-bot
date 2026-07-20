@@ -210,9 +210,9 @@ pub fn comment_card(c: &CommentInfo, header: &str, lead: &str) -> Value {
 /// PR 审查完成卡片（通知 PR 作者）。
 pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
     let state_text = match state {
-        "approved" => "✅ 通过",
-        "changes_requested" => "🔧 需修改",
-        "commented" => "💬 已评论",
+        "approved" => "通过",
+        "changes_requested" => "需修改",
+        "commented" => "已评论",
         other => other,
     };
     notification_card(
@@ -231,6 +231,35 @@ pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
         task_value(&format!("PR #{}", pr.number), &pr.repo_full_name, &pr.title, &pr.url),
         "来自 GitHub · 点按钮查看详情",
     )
+}
+
+/// 把一张通知卡片包装成「管理员回退通知」：变红色头、加显著标识，
+/// 让管理员一眼知道是"无人受理才抄送给你知悉"，而非指派给你。
+pub fn to_admin_notice(card: &Value) -> Value {
+    let mut c = card.clone();
+    if let Some(header) = c.get_mut("header") {
+        header["template"] = json!("carmine");
+        let orig = header
+            .get("title")
+            .and_then(|t| t.get("content"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        header["title"]["content"] = json!(format!("管理员通知 · {orig}"));
+    }
+    if let Some(elements) = c.get_mut("elements").and_then(|e| e.as_array_mut()) {
+        elements.insert(
+            0,
+            json!({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "**此项暂无受理人**，作为管理员抄送你知悉（并非指派给你）；如需推进请在 GitHub 指派受理人。"
+                }
+            }),
+        );
+    }
+    c
 }
 
 /// 用示例数据生成每一种卡片，供 `dump-cards` 预览。返回 (名称, 卡片 JSON)。
@@ -284,6 +313,7 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         ("PR 审查完成(通知作者)", pr_review_card(&pr, "li-si", "approved")),
         ("PR 已合并", pr_card(&pr, PrCardStatus::Merged, "您的 PR 已合并")),
         ("PR 已关闭", pr_card(&pr, PrCardStatus::Closed, "您的 PR 已关闭")),
+        ("管理员回退通知", to_admin_notice(&pr_card(&pr, PrCardStatus::Open, "有一条 PR 待处理"))),
         ("绑定卡片", binding_card()),
     ]
 }
