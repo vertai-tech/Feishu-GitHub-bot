@@ -7,6 +7,9 @@ pub struct IssuesPayload {
     pub action: String,
     pub issue: Issue,
     pub repository: Repository,
+    /// assigned 事件中被指派的受理人
+    #[serde(default)]
+    pub assignee: Option<User>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +29,9 @@ pub struct Issue {
     /// 该 "issue" 其实是 PR 时才有此字段（issue_comment 事件对 PR 也会触发）
     #[serde(default)]
     pub pull_request: Option<serde_json::Value>,
+    /// 当前受理人列表
+    #[serde(default)]
+    pub assignees: Vec<User>,
 }
 
 impl Issue {
@@ -59,6 +65,8 @@ pub struct IssueInfo {
     pub title: String,
     pub url: String,
     pub author: String,
+    /// 当前受理人 GitHub 登录名列表
+    pub assignees: Vec<String>,
 }
 
 /// `issues` 事件归一化。
@@ -67,6 +75,10 @@ pub enum IssueEvent {
     Opened(IssueInfo),
     Closed(IssueInfo),
     Reopened(IssueInfo),
+    Assigned {
+        issue: IssueInfo,
+        assignee_login: String,
+    },
     Ignored,
 }
 
@@ -78,6 +90,7 @@ impl IssuesPayload {
             title: self.issue.title.clone(),
             url: self.issue.html_url.clone(),
             author: self.issue.user.login.clone(),
+            assignees: self.issue.assignees.iter().map(|u| u.login.clone()).collect(),
         }
     }
 
@@ -86,6 +99,13 @@ impl IssuesPayload {
             "opened" => IssueEvent::Opened(self.info()),
             "closed" => IssueEvent::Closed(self.info()),
             "reopened" => IssueEvent::Reopened(self.info()),
+            "assigned" => match &self.assignee {
+                Some(a) => IssueEvent::Assigned {
+                    issue: self.info(),
+                    assignee_login: a.login.clone(),
+                },
+                None => IssueEvent::Ignored,
+            },
             _ => IssueEvent::Ignored,
         }
     }
@@ -100,12 +120,18 @@ pub struct CommentInfo {
     pub commenter: String,
     pub body: String,
     pub comment_url: String,
+    /// 该 Issue 的受理人（Issue 评论按此路由）
+    pub assignees: Vec<String>,
+    /// 评论对象是否为 PR
+    pub is_pr: bool,
+    /// Issue/PR 的创建者（PR 评论按此通知作者）
+    pub author: String,
 }
 
 impl IssueCommentPayload {
-    /// 仅当 action==created 且评论对象是纯 Issue（非 PR）时返回 Some。
-    pub fn as_created_issue_comment(&self) -> Option<CommentInfo> {
-        if self.action != "created" || self.issue.is_pull_request() {
+    /// 仅当 action==created 时返回评论信息（Issue 与 PR 都返回，用 is_pr 区分）。
+    pub fn as_created_comment(&self) -> Option<CommentInfo> {
+        if self.action != "created" {
             return None;
         }
         Some(CommentInfo {
@@ -115,6 +141,9 @@ impl IssueCommentPayload {
             commenter: self.comment.user.login.clone(),
             body: self.comment.body.clone(),
             comment_url: self.comment.html_url.clone(),
+            assignees: self.issue.assignees.iter().map(|u| u.login.clone()).collect(),
+            is_pr: self.issue.is_pull_request(),
+            author: self.issue.user.login.clone(),
         })
     }
 }
@@ -146,20 +175,24 @@ mod tests {
             "repository": {"full_name":"o/r"}
         });
         let p: IssueCommentPayload = serde_json::from_value(json).unwrap();
-        let c = p.as_created_issue_comment().expect("应识别为 issue 评论");
+        let c = p.as_created_comment().expect("应识别为评论");
         assert_eq!(c.commenter, "bob");
         assert_eq!(c.issue_number, 5);
+        assert!(!c.is_pr);
+        assert_eq!(c.author, "a");
     }
 
     #[test]
-    fn issue_comment_on_pr_skipped() {
+    fn comment_on_pr_marked_is_pr() {
         let json = serde_json::json!({
             "action": "created",
-            "issue": {"html_url":"iu","number":6,"title":"T","user":{"login":"a"},"pull_request":{"url":"x"}},
+            "issue": {"html_url":"iu","number":6,"title":"T","user":{"login":"prauthor"},"pull_request":{"url":"x"}},
             "comment": {"html_url":"cu","body":"hi","user":{"login":"bob"}},
             "repository": {"full_name":"o/r"}
         });
         let p: IssueCommentPayload = serde_json::from_value(json).unwrap();
-        assert!(p.as_created_issue_comment().is_none());
+        let c = p.as_created_comment().expect("PR 评论也应返回");
+        assert!(c.is_pr);
+        assert_eq!(c.author, "prauthor");
     }
 }
