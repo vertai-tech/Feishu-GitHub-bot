@@ -305,7 +305,7 @@ async fn deliver_to_assignees(
     // 无收件人 → 视需要回退给管理员（带显著"管理员通知"标识）。
     if assignees.is_empty() {
         if admin_fallback {
-            let notice = crate::cards::to_admin_notice(card);
+            let notice = crate::cards::to_broadcast_notice(card);
             if let Err(e) = state
                 .feishu
                 .send_card(&cfg.notify_id_type, &cfg.notify_id, &notice)

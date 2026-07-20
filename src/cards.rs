@@ -254,9 +254,9 @@ pub fn sla_reminder_card(kind: &str, number: u64, title: &str, url: &str, role: 
     )
 }
 
-/// 把一张通知卡片包装成「管理员回退通知」：变红色头、加显著标识，
-/// 让管理员一眼知道是"无人受理才抄送给你知悉"，而非指派给你。
-pub fn to_admin_notice(card: &Value) -> Value {
+/// 把一张通知卡片包装成「待认领广播」（发到群里）：变色头 + 广播口吻，
+/// 面向全群而非某个人——用于无受理人时在群里公告。
+pub fn to_broadcast_notice(card: &Value) -> Value {
     let mut c = card.clone();
     if let Some(header) = c.get_mut("header") {
         header["template"] = json!("carmine");
@@ -266,19 +266,22 @@ pub fn to_admin_notice(card: &Value) -> Value {
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string();
-        header["title"]["content"] = json!(format!("管理员通知 · {orig}"));
+        header["title"]["content"] = json!(format!("待认领 · {orig}"));
     }
+    // 用广播口吻替换掉原本给个人看的引导语（elements[0]）。
     if let Some(elements) = c.get_mut("elements").and_then(|e| e.as_array_mut()) {
-        elements.insert(
-            0,
-            json!({
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": "**此项暂无受理人**，作为管理员抄送你知悉（并非指派给你）；如需推进请在 GitHub 指派受理人。"
-                }
-            }),
-        );
+        let broadcast = json!({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": "**此项暂无受理人**，请相关同学认领，或在 GitHub 指派受理人。"
+            }
+        });
+        if elements.is_empty() {
+            elements.push(broadcast);
+        } else {
+            elements[0] = broadcast;
+        }
     }
     c
 }
@@ -334,7 +337,7 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         ("PR 审查完成(通知作者)", pr_review_card(&pr, "li-si", "approved")),
         ("PR 已合并", pr_card(&pr, PrCardStatus::Merged, "您的 PR 已合并")),
         ("PR 已关闭", pr_card(&pr, PrCardStatus::Closed, "您的 PR 已关闭")),
-        ("管理员回退通知", to_admin_notice(&pr_card(&pr, PrCardStatus::Open, "有一条 PR 待处理"))),
+        ("待认领广播", to_broadcast_notice(&pr_card(&pr, PrCardStatus::Open, "有一条 PR 待处理"))),
         ("绑定卡片", binding_card()),
     ]
 }
