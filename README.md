@@ -127,3 +127,5 @@ cargo test          # 单元测试：签名校验、事件归类
 ```
 
 本地联调：见 `config.example.toml` 起服务后，用 GitHub webhook 页的 "Redeliver"，或用签名过的 fixture `curl` 打 `/webhook/github`；飞书侧点绑定卡片验证多维表格写入。
+
+<!-- 测试 PR：飞书通知联调 1784519749 -->
