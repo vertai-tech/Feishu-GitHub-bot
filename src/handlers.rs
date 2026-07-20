@@ -320,7 +320,7 @@ async fn deliver_to_assignees(
         {
             Ok(Some(open_id)) => {
                 if let Err(e) = state.feishu.send_card("open_id", &open_id, card).await {
-                    let hint = format!("⚠️ {label} #{number}（{repo}）通知{role} `{login}` 失败：{e}");
+                    let hint = format!("{label} #{number}（{repo}）通知{role} `{login}` 失败：{e}");
                     let _ = state
                         .feishu
                         .send_text(&cfg.notify_id_type, &cfg.notify_id, &hint)
@@ -348,7 +348,7 @@ async fn deliver_to_assignees(
             }
             Ok(None) => {
                 let hint = format!(
-                    "⚠️ {label} #{number}（{repo}）的{role} `{login}` 还没绑定飞书账号，无法通知，请其私聊我完成绑定。"
+                    "{label} #{number}（{repo}）的{role} `{login}` 还没绑定飞书账号，无法通知，请其私聊我完成绑定。"
                 );
                 let _ = state
                     .feishu
@@ -401,7 +401,7 @@ async fn handle_review_requested(
     let Some(open_id) = open_id else {
         // 未绑定：群里提示，仍不报错。
         let hint = format!(
-            "⚠️ GitHub 用户 `{reviewer_login}` 被请求 review PR #{num}（{repo}），但还没绑定飞书账号，无法派任务。请该同学私聊我完成绑定。",
+            "GitHub 用户 `{reviewer_login}` 被请求 review PR #{num}（{repo}），但还没绑定飞书账号，无法派任务。请该同学私聊我完成绑定。",
             num = pr.number,
             repo = pr.repo_full_name,
         );

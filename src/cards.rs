@@ -210,9 +210,9 @@ pub fn comment_card(c: &CommentInfo, header: &str, lead: &str) -> Value {
 /// PR 审查完成卡片（通知 PR 作者）。
 pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
     let state_text = match state {
-        "approved" => "✅ 通过",
-        "changes_requested" => "🔧 需修改",
-        "commented" => "💬 已评论",
+        "approved" => "通过",
+        "changes_requested" => "需修改",
+        "commented" => "已评论",
         other => other,
     };
     notification_card(
@@ -245,7 +245,7 @@ pub fn to_admin_notice(card: &Value) -> Value {
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string();
-        header["title"]["content"] = json!(format!("🛰 管理员通知 · {orig}"));
+        header["title"]["content"] = json!(format!("管理员通知 · {orig}"));
     }
     if let Some(elements) = c.get_mut("elements").and_then(|e| e.as_array_mut()) {
         elements.insert(
@@ -254,7 +254,7 @@ pub fn to_admin_notice(card: &Value) -> Value {
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": "⚠️ **此项暂无受理人**，作为管理员抄送你知悉（并非指派给你）；如需推进请在 GitHub 指派受理人。"
+                    "content": "**此项暂无受理人**，作为管理员抄送你知悉（并非指派给你）；如需推进请在 GitHub 指派受理人。"
                 }
             }),
         );
