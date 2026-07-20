@@ -254,26 +254,44 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             handle_review_requested(state, &pr, &reviewer_login).await?;
         }
         PrEvent::ReadyForReview(pr) => {
-            // 草案转正式：通知受理人待处理，并（重新）开始 SLA 计时。
-            let card = pr_card(&pr, PrCardStatus::Open, "Pull Request 已就绪（草案转正式），待处理");
-            deliver_to_assignees(
-                state, &pr.repo_full_name, pr.number, true, "受理人",
-                &pr.assignees, &card, Some("ready"), false,
-            )
-            .await;
-            for login in &pr.assignees {
-                track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, login, "受理人").await;
+            // 草案转正式。有受理人→通知受理人并（重新）开始 SLA；无受理人→私聊作者。
+            if pr.assignees.is_empty() {
+                let card = pr_card(&pr, PrCardStatus::Open, "您的 Pull Request 已就绪（草案转正式）");
+                deliver_to_assignees(
+                    state, &pr.repo_full_name, pr.number, true, "创建者",
+                    std::slice::from_ref(&pr.author), &card, None, false,
+                )
+                .await;
+            } else {
+                let card = pr_card(&pr, PrCardStatus::Open, "Pull Request 已就绪（草案转正式），待处理");
+                deliver_to_assignees(
+                    state, &pr.repo_full_name, pr.number, true, "受理人",
+                    &pr.assignees, &card, Some("ready"), false,
+                )
+                .await;
+                for login in &pr.assignees {
+                    track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, login, "受理人").await;
+                }
             }
         }
         PrEvent::ConvertedToDraft(pr) => {
-            // 转为草案：通知受理人暂缓，并暂停 SLA 计时（标记 done）。
+            // 转为草案：暂停 SLA。有受理人→通知受理人暂缓；无受理人→私聊作者。
             store::mark_all_done(state, &pr.repo_full_name, pr.number).await;
-            let card = pr_card(&pr, PrCardStatus::Closed, "Pull Request 已转为草案，暂缓处理");
-            deliver_to_assignees(
-                state, &pr.repo_full_name, pr.number, true, "受理人",
-                &pr.assignees, &card, None, false,
-            )
-            .await;
+            if pr.assignees.is_empty() {
+                let card = pr_card(&pr, PrCardStatus::Closed, "您的 Pull Request 已转为草案");
+                deliver_to_assignees(
+                    state, &pr.repo_full_name, pr.number, true, "创建者",
+                    std::slice::from_ref(&pr.author), &card, None, false,
+                )
+                .await;
+            } else {
+                let card = pr_card(&pr, PrCardStatus::Closed, "Pull Request 已转为草案，暂缓处理");
+                deliver_to_assignees(
+                    state, &pr.repo_full_name, pr.number, true, "受理人",
+                    &pr.assignees, &card, None, false,
+                )
+                .await;
+            }
         }
         PrEvent::Closed(pr) => {
             handle_closed(state, &pr).await?;
