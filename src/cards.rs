@@ -91,6 +91,7 @@ fn task_value(kind: &str, repo: &str, title: &str, url: &str) -> Value {
 }
 
 /// PR 状态，用于卡片头部颜色与文案。
+#[derive(Clone, Copy)]
 pub enum PrCardStatus {
     Open,
     Merged,
@@ -172,8 +173,8 @@ pub fn issue_card(issue: &IssueInfo, status: IssueCardStatus) -> Value {
     )
 }
 
-/// Issue 新评论卡片。评论正文过长时截断。
-pub fn issue_comment_card(c: &CommentInfo) -> Value {
+/// 新评论卡片（Issue/PR 通用）。`header`/`lead` 由调用方按场景给定。
+pub fn comment_card(c: &CommentInfo, header: &str, lead: &str) -> Value {
     const MAX: usize = 300;
     let mut body: String = c.body.chars().take(MAX).collect();
     if c.body.chars().count() > MAX {
@@ -185,10 +186,11 @@ pub fn issue_comment_card(c: &CommentInfo) -> Value {
         .map(|l| format!("> {l}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let kind = if c.is_pr { "PR" } else { "Issue" };
     notification_card(
         "blue",
-        "Issue 新评论",
-        "您受理的 Issue 有一条新评论待处理",
+        header,
+        lead,
         &format!("**#{} {}**", c.issue_number, c.issue_title),
         vec![
             short_field("仓库", &format!("`{}`", c.repo_full_name)),
@@ -200,7 +202,33 @@ pub fn issue_comment_card(c: &CommentInfo) -> Value {
         })],
         "查看评论",
         &c.comment_url,
-        task_value(&format!("Issue #{}", c.issue_number), &c.repo_full_name, &c.issue_title, &c.comment_url),
+        task_value(&format!("{kind} #{}", c.issue_number), &c.repo_full_name, &c.issue_title, &c.comment_url),
+        "来自 GitHub · 点按钮查看详情",
+    )
+}
+
+/// PR 审查完成卡片（通知 PR 作者）。
+pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
+    let state_text = match state {
+        "approved" => "✅ 通过",
+        "changes_requested" => "🔧 需修改",
+        "commented" => "💬 已评论",
+        other => other,
+    };
+    notification_card(
+        "green",
+        "PR 审查完成",
+        "您的 PR 审查已完成",
+        &format!("**#{} {}**", pr.number, pr.title),
+        vec![
+            short_field("仓库", &format!("`{}`", pr.repo_full_name)),
+            short_field("审查人", reviewer),
+            short_field("结论", state_text),
+        ],
+        vec![],
+        "查看 PR",
+        &pr.url,
+        task_value(&format!("PR #{}", pr.number), &pr.repo_full_name, &pr.title, &pr.url),
         "来自 GitHub · 点按钮查看详情",
     )
 }
@@ -216,6 +244,7 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         base_ref: "main".into(),
         head_ref: "feat/login".into(),
         merged: false,
+        assignees: vec![],
     };
     let issue = IssueInfo {
         repo_full_name: "damesck/testrepo".into(),
@@ -223,6 +252,7 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         title: "登录页在移动端错位".into(),
         url: "https://github.com/damesck/testrepo/issues/2".into(),
         author: "zhang-san".into(),
+        assignees: vec![],
     };
     let comment = CommentInfo {
         repo_full_name: "damesck/testrepo".into(),
@@ -231,17 +261,29 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         commenter: "li-si".into(),
         body: "我这边也能复现，iOS Safari 上按钮溢出了容器。\n附一张截图待补。".into(),
         comment_url: "https://github.com/damesck/testrepo/issues/2#issuecomment-2".into(),
+        assignees: vec![],
+        is_pr: false,
+        author: "zhang-san".into(),
+    };
+    let pr_comment = CommentInfo {
+        is_pr: true,
+        issue_title: "重构登录模块".into(),
+        comment_url: "https://github.com/damesck/testrepo/pull/12#issuecomment-9".into(),
+        issue_number: 12,
+        ..comment.clone()
     };
 
     vec![
         ("Issue 新建", issue_card(&issue, IssueCardStatus::Opened)),
         ("Issue 关闭", issue_card(&issue, IssueCardStatus::Closed)),
         ("Issue 重新打开", issue_card(&issue, IssueCardStatus::Reopened)),
-        ("Issue 新评论", issue_comment_card(&comment)),
-        ("PR 新建", pr_card(&pr, PrCardStatus::Open, "有一条新 PR 待关注")),
+        ("Issue 新评论", comment_card(&comment, "Issue 新评论", "您受理的 Issue 有一条新评论待处理")),
+        ("PR 新建", pr_card(&pr, PrCardStatus::Open, "您有一条 PR 待处理")),
         ("PR 待 Review", pr_card(&pr, PrCardStatus::Open, "您有一条 PR 待 Review")),
-        ("PR 已合并", pr_card(&pr, PrCardStatus::Merged, "您跟进的 PR 已合并")),
-        ("PR 已关闭", pr_card(&pr, PrCardStatus::Closed, "您跟进的 PR 已关闭")),
+        ("PR 新评论(通知作者)", comment_card(&pr_comment, "PR 新评论", "您的 PR 有新评论")),
+        ("PR 审查完成(通知作者)", pr_review_card(&pr, "li-si", "approved")),
+        ("PR 已合并", pr_card(&pr, PrCardStatus::Merged, "您的 PR 已合并")),
+        ("PR 已关闭", pr_card(&pr, PrCardStatus::Closed, "您的 PR 已关闭")),
         ("绑定卡片", binding_card()),
     ]
 }
