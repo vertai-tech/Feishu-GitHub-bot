@@ -7,6 +7,9 @@ pub struct IssuesPayload {
     pub action: String,
     pub issue: Issue,
     pub repository: Repository,
+    /// assigned 事件中被指派的受理人
+    #[serde(default)]
+    pub assignee: Option<User>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +29,9 @@ pub struct Issue {
     /// 该 "issue" 其实是 PR 时才有此字段（issue_comment 事件对 PR 也会触发）
     #[serde(default)]
     pub pull_request: Option<serde_json::Value>,
+    /// 当前受理人列表
+    #[serde(default)]
+    pub assignees: Vec<User>,
 }
 
 impl Issue {
@@ -59,6 +65,8 @@ pub struct IssueInfo {
     pub title: String,
     pub url: String,
     pub author: String,
+    /// 当前受理人 GitHub 登录名列表
+    pub assignees: Vec<String>,
 }
 
 /// `issues` 事件归一化。
@@ -67,6 +75,10 @@ pub enum IssueEvent {
     Opened(IssueInfo),
     Closed(IssueInfo),
     Reopened(IssueInfo),
+    Assigned {
+        issue: IssueInfo,
+        assignee_login: String,
+    },
     Ignored,
 }
 
@@ -78,6 +90,7 @@ impl IssuesPayload {
             title: self.issue.title.clone(),
             url: self.issue.html_url.clone(),
             author: self.issue.user.login.clone(),
+            assignees: self.issue.assignees.iter().map(|u| u.login.clone()).collect(),
         }
     }
 
@@ -86,6 +99,13 @@ impl IssuesPayload {
             "opened" => IssueEvent::Opened(self.info()),
             "closed" => IssueEvent::Closed(self.info()),
             "reopened" => IssueEvent::Reopened(self.info()),
+            "assigned" => match &self.assignee {
+                Some(a) => IssueEvent::Assigned {
+                    issue: self.info(),
+                    assignee_login: a.login.clone(),
+                },
+                None => IssueEvent::Ignored,
+            },
             _ => IssueEvent::Ignored,
         }
     }

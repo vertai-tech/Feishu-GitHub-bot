@@ -12,6 +12,9 @@ pub struct PullRequestPayload {
     /// review_requested 事件中被请求的 reviewer
     #[serde(default)]
     pub requested_reviewer: Option<User>,
+    /// assigned 事件中被指派的受理人
+    #[serde(default)]
+    pub assignee: Option<User>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +26,9 @@ pub struct PullRequest {
     pub head: GitRef,
     #[serde(default)]
     pub merged: bool,
+    /// 当前受理人列表
+    #[serde(default)]
+    pub assignees: Vec<User>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +58,8 @@ pub struct PrInfo {
     pub base_ref: String,
     pub head_ref: String,
     pub merged: bool,
+    /// 当前受理人 GitHub 登录名列表
+    pub assignees: Vec<String>,
 }
 
 /// 归一化后的事件语义。
@@ -61,6 +69,11 @@ pub enum PrEvent {
     Opened(PrInfo),
     /// 请求某人 review
     ReviewRequested { pr: PrInfo, reviewer_login: String },
+    /// 指派受理人
+    Assigned {
+        pr: PrInfo,
+        assignee_login: String,
+    },
     /// PR 关闭（merged 区分是否已合并）
     Closed(PrInfo),
     /// 其它 action，忽略
@@ -78,6 +91,12 @@ impl PullRequestPayload {
             base_ref: self.pull_request.base.git_ref.clone(),
             head_ref: self.pull_request.head.git_ref.clone(),
             merged: self.pull_request.merged,
+            assignees: self
+                .pull_request
+                .assignees
+                .iter()
+                .map(|u| u.login.clone())
+                .collect(),
         }
     }
 
@@ -91,6 +110,13 @@ impl PullRequestPayload {
                     reviewer_login: r.login.clone(),
                 },
                 // 请求的是 team 而非个人时无 requested_reviewer，忽略
+                None => PrEvent::Ignored,
+            },
+            "assigned" => match &self.assignee {
+                Some(a) => PrEvent::Assigned {
+                    pr: self.pr_info(),
+                    assignee_login: a.login.clone(),
+                },
                 None => PrEvent::Ignored,
             },
             "closed" => PrEvent::Closed(self.pr_info()),

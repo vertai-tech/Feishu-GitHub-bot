@@ -3,7 +3,7 @@
 use crate::cards::{binding_card, issue_card, issue_comment_card, pr_card, IssueCardStatus, PrCardStatus};
 use crate::feishu::callback::{self, Callback};
 use crate::github::events::{PrEvent, PrInfo, PullRequestPayload};
-use crate::github::issues::{CommentInfo, IssueEvent, IssuesPayload, IssueCommentPayload};
+use crate::github::issues::{CommentInfo, IssueEvent, IssueInfo, IssuesPayload, IssueCommentPayload};
 use crate::github::verify::verify_signature;
 use crate::state::AppState;
 use crate::{binding, store};
@@ -129,19 +129,93 @@ fn in_org(org: &str, full_name: &str) -> bool {
 
 async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Result<()> {
     let cfg = &state.cfg.feishu;
+
+    // assigned 单独处理：只通知新受理人。
+    if let IssueEvent::Assigned {
+        issue,
+        assignee_login,
+    } = &event
+    {
+        notify_issue_assignee(state, issue, assignee_login).await;
+        return Ok(());
+    }
+
     let (issue, status) = match event {
         IssueEvent::Opened(i) => (i, IssueCardStatus::Opened),
         IssueEvent::Closed(i) => (i, IssueCardStatus::Closed),
         IssueEvent::Reopened(i) => (i, IssueCardStatus::Reopened),
-        IssueEvent::Ignored => return Ok(()),
+        _ => return Ok(()),
     };
+    let is_opened = matches!(status, IssueCardStatus::Opened);
+    // 抄送管理员。
     let card = issue_card(&issue, status);
     state
         .feishu
         .send_card(&cfg.notify_id_type, &cfg.notify_id, &card)
         .await?;
     info!("Issue 通知已发：{}#{}", issue.repo_full_name, issue.number);
+    // 开单时已带的受理人也通知（仅 Opened 建任务）。
+    if is_opened {
+        for login in &issue.assignees {
+            notify_issue_assignee(state, &issue, login).await;
+        }
+    }
     Ok(())
+}
+
+/// 通知 Issue 受理人：绑定则私聊发卡片 + 建任务；未绑定则回退提示管理员。
+/// 按 (Issue + 受理人) 去重。
+async fn notify_issue_assignee(state: &AppState, issue: &IssueInfo, login: &str) {
+    let cfg = &state.cfg.feishu;
+    let dedup = format!(
+        "assignee:{}#{}:{login}",
+        issue.repo_full_name, issue.number
+    );
+    if !state.mark_delivery(&dedup) {
+        return;
+    }
+    let open_id = match binding::lookup_open_id(
+        &state.feishu,
+        &cfg.base_app_token,
+        &cfg.binding_table_id,
+        login,
+    )
+    .await
+    {
+        Ok(Some(oid)) => oid,
+        Ok(None) => {
+            let hint = format!(
+                "⚠️ Issue #{num}（{repo}）的受理人 `{login}` 还没绑定飞书账号，无法直接通知，请其私聊我完成绑定。",
+                num = issue.number,
+                repo = issue.repo_full_name,
+            );
+            let _ = state
+                .feishu
+                .send_text(&cfg.notify_id_type, &cfg.notify_id, &hint)
+                .await;
+            warn!("Issue 受理人 {login} 未绑定，已回退通知管理员");
+            return;
+        }
+        Err(e) => {
+            error!("查询受理人 {login} 绑定失败: {e:#}");
+            return;
+        }
+    };
+
+    let card = issue_card(issue, IssueCardStatus::Opened);
+    if let Err(e) = state.feishu.send_card("open_id", &open_id, &card).await {
+        warn!("私聊 Issue 受理人 {login} 卡片失败: {e:#}");
+    }
+    let summary = format!("处理 Issue #{}: {}", issue.number, issue.title);
+    let description = format!("{}\n{}", issue.repo_full_name, issue.url);
+    match state
+        .feishu
+        .create_task(&summary, &description, &open_id)
+        .await
+    {
+        Ok(guid) => info!("已通知 Issue 受理人 {login} 并建任务 {guid}"),
+        Err(e) => warn!("给 Issue 受理人 {login} 建任务失败: {e:#}"),
+    }
 }
 
 async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Result<()> {
@@ -159,6 +233,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
     let cfg = &state.cfg.feishu;
     match event {
         PrEvent::Opened(pr) => {
+            // 抄送管理员一张广播卡片，并登记跟踪。
             let card = pr_card(&pr, PrCardStatus::Open, "有一条新 PR 待关注");
             let msg_id = state
                 .feishu
@@ -175,6 +250,13 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             )
             .await?;
             info!("PR opened 通知已发：{}", store::pr_key(&pr.repo_full_name, pr.number));
+            // 开单时已带的受理人也通知。
+            for login in &pr.assignees {
+                notify_pr_assignee(state, &pr, login).await;
+            }
+        }
+        PrEvent::Assigned { pr, assignee_login } => {
+            notify_pr_assignee(state, &pr, &assignee_login).await;
         }
         PrEvent::ReviewRequested { pr, reviewer_login } => {
             handle_review_requested(state, &pr, &reviewer_login).await?;
@@ -185,6 +267,70 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
         PrEvent::Ignored => {}
     }
     Ok(())
+}
+
+/// 通知 PR 受理人：绑定则私聊发卡片 + 建任务并登记；未绑定则回退提示管理员。
+/// 按 (PR + 受理人) 去重，避免 opened 与 assigned 重复通知。
+async fn notify_pr_assignee(state: &AppState, pr: &PrInfo, login: &str) {
+    let cfg = &state.cfg.feishu;
+    let dedup = format!("assignee:{}#{}:{login}", pr.repo_full_name, pr.number);
+    if !state.mark_delivery(&dedup) {
+        return;
+    }
+    let open_id = match binding::lookup_open_id(
+        &state.feishu,
+        &cfg.base_app_token,
+        &cfg.binding_table_id,
+        login,
+    )
+    .await
+    {
+        Ok(Some(oid)) => oid,
+        Ok(None) => {
+            let hint = format!(
+                "⚠️ PR #{num}（{repo}）的受理人 `{login}` 还没绑定飞书账号，无法直接通知，请其私聊我完成绑定。",
+                num = pr.number,
+                repo = pr.repo_full_name,
+            );
+            let _ = state
+                .feishu
+                .send_text(&cfg.notify_id_type, &cfg.notify_id, &hint)
+                .await;
+            warn!("PR 受理人 {login} 未绑定，已回退通知管理员");
+            return;
+        }
+        Err(e) => {
+            error!("查询受理人 {login} 绑定失败: {e:#}");
+            return;
+        }
+    };
+
+    let card = pr_card(pr, PrCardStatus::Open, "您有一条 PR 待处理");
+    if let Err(e) = state.feishu.send_card("open_id", &open_id, &card).await {
+        warn!("私聊受理人 {login} 卡片失败: {e:#}");
+    }
+    let summary = format!("处理 PR #{}: {}", pr.number, pr.title);
+    let description = format!("{}\n{}", pr.repo_full_name, pr.url);
+    match state
+        .feishu
+        .create_task(&summary, &description, &open_id)
+        .await
+    {
+        Ok(guid) => {
+            let _ = store::record_review_task(
+                &state.feishu,
+                &cfg.base_app_token,
+                &cfg.pr_table_id,
+                &pr.repo_full_name,
+                pr.number,
+                login,
+                &guid,
+            )
+            .await;
+            info!("已通知 PR 受理人 {login} 并建任务 {guid}");
+        }
+        Err(e) => warn!("给 PR 受理人 {login} 建任务失败: {e:#}"),
+    }
 }
 
 async fn handle_review_requested(

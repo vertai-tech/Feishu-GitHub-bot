@@ -216,6 +216,7 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         base_ref: "main".into(),
         head_ref: "feat/login".into(),
         merged: false,
+        assignees: vec![],
     };
     let issue = IssueInfo {
         repo_full_name: "damesck/testrepo".into(),
@@ -223,6 +224,7 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         title: "登录页在移动端错位".into(),
         url: "https://github.com/damesck/testrepo/issues/2".into(),
         author: "zhang-san".into(),
+        assignees: vec![],
     };
     let comment = CommentInfo {
         repo_full_name: "damesck/testrepo".into(),
