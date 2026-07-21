@@ -10,6 +10,12 @@ pub struct IssuesPayload {
     /// assigned 事件中被指派的受理人
     #[serde(default)]
     pub assignee: Option<User>,
+    /// 触发事件的操作者
+    #[serde(default)]
+    pub sender: Option<User>,
+    /// edited 事件的变更详情（含 body/title）
+    #[serde(default)]
+    pub changes: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +89,10 @@ pub enum IssueEvent {
         issue: IssueInfo,
         assignee_login: String,
     },
+    Edited {
+        issue: IssueInfo,
+        editor_login: String,
+    },
     Ignored,
 }
 
@@ -114,6 +124,13 @@ impl IssuesPayload {
                 Some(a) => IssueEvent::Unassigned {
                     issue: self.info(),
                     assignee_login: a.login.clone(),
+                },
+                None => IssueEvent::Ignored,
+            },
+            "edited" if crate::github::events::body_changed(&self.changes) => match &self.sender {
+                Some(s) => IssueEvent::Edited {
+                    issue: self.info(),
+                    editor_login: s.login.clone(),
                 },
                 None => IssueEvent::Ignored,
             },

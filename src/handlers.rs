@@ -1,6 +1,6 @@
 //! HTTP 入口与事件编排：把 GitHub 事件翻译成飞书动作，处理飞书卡片回调。
 
-use crate::cards::{binding_card, comment_card, issue_card, pr_card, pr_review_card, unassigned_card, IssueCardStatus, PrCardStatus};
+use crate::cards::{binding_card, comment_card, issue_card, pr_card, pr_review_card, unassigned_card, updated_card, IssueCardStatus, PrCardStatus};
 use crate::feishu::callback::{self, Callback};
 use crate::github::events::{PrEvent, PrInfo, PullRequestPayload, ReviewInfo, ReviewPayload};
 use crate::github::issues::{CommentInfo, IssueEvent, IssuesPayload, IssueCommentPayload};
@@ -166,6 +166,16 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = unassigned_card(false, &issue.repo_full_name, issue.number, &issue.title, &issue.url);
             notify_person_private(state, &assignee_login, &card).await;
         }
+        IssueEvent::Edited { issue, editor_login } => {
+            store::reset_pending_on_activity(state, &issue.repo_full_name, issue.number, &editor_login).await;
+            let others: Vec<String> = issue.assignees.iter().filter(|a| **a != editor_login).cloned().collect();
+            let card = updated_card(false, &issue.repo_full_name, issue.number, &issue.title, &issue.url);
+            deliver_to_assignees(
+                state, &issue.repo_full_name, issue.number, false, "受理人",
+                &others, &card, None, false,
+            )
+            .await;
+        }
         IssueEvent::Closed(issue) => {
             store::mark_all_done(state, &issue.repo_full_name, issue.number).await;
             let card = issue_card(&issue, IssueCardStatus::Closed);
@@ -244,6 +254,17 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             store::mark_done(state, &pr.repo_full_name, pr.number, &assignee_login).await;
             let card = unassigned_card(true, &pr.repo_full_name, pr.number, &pr.title, &pr.url);
             notify_person_private(state, &assignee_login, &card).await;
+        }
+        PrEvent::Edited { pr, editor_login } => {
+            // 正文更新：编辑者本人的行 done，其余受理人重新计时并私聊提示更新。
+            store::reset_pending_on_activity(state, &pr.repo_full_name, pr.number, &editor_login).await;
+            let others: Vec<String> = pr.assignees.iter().filter(|a| **a != editor_login).cloned().collect();
+            let card = updated_card(true, &pr.repo_full_name, pr.number, &pr.title, &pr.url);
+            deliver_to_assignees(
+                state, &pr.repo_full_name, pr.number, true, "受理人",
+                &others, &card, None, false,
+            )
+            .await;
         }
         PrEvent::ReviewRequested { pr, reviewer_login } => {
             handle_review_requested(state, &pr, &reviewer_login).await?;

@@ -233,6 +233,23 @@ pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
     )
 }
 
+/// 正文更新通知卡片（私聊受理人）。
+pub fn updated_card(is_pr: bool, repo: &str, number: u64, title: &str, url: &str) -> Value {
+    let t = if is_pr { "Pull Request" } else { "Issue" };
+    notification_card(
+        "orange",
+        format!("{t} 正文更新").as_str(),
+        format!("您受理的 {t} 正文已更新，请查看").as_str(),
+        &format!("**#{number} {title}**"),
+        vec![short_field("仓库", &format!("`{repo}`"))],
+        vec![],
+        &format!("查看 {t}"),
+        url,
+        task_value(&format!("{t} #{number}"), repo, title, url),
+        "来自 GitHub · 正文有更新",
+    )
+}
+
 /// 取消受理通知卡片（私聊被移除的受理人）。
 pub fn unassigned_card(is_pr: bool, repo: &str, number: u64, title: &str, url: &str) -> Value {
     let t = if is_pr { "Pull Request" } else { "Issue" };
