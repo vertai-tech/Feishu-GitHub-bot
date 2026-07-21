@@ -149,21 +149,14 @@ fn in_org(org: &str, full_name: &str) -> bool {
 async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Result<()> {
     match event {
         IssueEvent::Opened(issue) => {
-            let card = issue_card(&issue, IssueCardStatus::Opened);
-            deliver_to_assignees(
-                state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, Some("assign"), false,
-            )
-            .await;
-            for login in &issue.assignees {
-                track_pending(state, &issue.repo_full_name, issue.number, &issue.title, &issue.url, false, login, "受理人").await;
-            }
+            // 开单本身不通知；受理人由 assigned 事件负责（GitHub 开单带受理人时也会发 assigned）。
+            info!("Issue opened：{}#{}", issue.repo_full_name, issue.number);
         }
         IssueEvent::Assigned { issue, assignee_login } => {
             let card = issue_card(&issue, IssueCardStatus::Opened);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                std::slice::from_ref(&assignee_login), &card, Some("assign"), true,
+                std::slice::from_ref(&assignee_login), &card, None, false,
             )
             .await;
             track_pending(state, &issue.repo_full_name, issue.number, &issue.title, &issue.url, false, &assignee_login, "受理人").await;
@@ -230,22 +223,14 @@ async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Resul
 async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()> {
     match event {
         PrEvent::Opened(pr) => {
-            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 Pull Request 待处理");
-            deliver_to_assignees(
-                state, &pr.repo_full_name, pr.number, true, "受理人",
-                &pr.assignees, &card, Some("assign"), false,
-            )
-            .await;
-            for login in &pr.assignees {
-                track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, login, "受理人").await;
-            }
-            info!("PR opened 处理完成：{}#{}", pr.repo_full_name, pr.number);
+            // 开单本身不通知；受理人由 assigned 事件负责。
+            info!("PR opened：{}#{}", pr.repo_full_name, pr.number);
         }
         PrEvent::Assigned { pr, assignee_login } => {
             let card = pr_card(&pr, PrCardStatus::Open, "您有一条 Pull Request 待处理");
             deliver_to_assignees(
                 state, &pr.repo_full_name, pr.number, true, "受理人",
-                std::slice::from_ref(&assignee_login), &card, Some("assign"), true,
+                std::slice::from_ref(&assignee_login), &card, None, false,
             )
             .await;
             track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, &assignee_login, "受理人").await;
@@ -266,7 +251,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
                 let card = pr_card(&pr, PrCardStatus::Open, "Pull Request 已就绪（草案转正式），待处理");
                 deliver_to_assignees(
                     state, &pr.repo_full_name, pr.number, true, "受理人",
-                    &pr.assignees, &card, Some("ready"), false,
+                    &pr.assignees, &card, None, false,
                 )
                 .await;
                 for login in &pr.assignees {
