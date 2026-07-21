@@ -50,9 +50,16 @@ pub fn business_seconds(from_ms: i64, to_ms: i64) -> i64 {
 pub async fn tick(state: &AppState) {
     let now = Utc::now().timestamp_millis();
     let rows = store::list_pending(state).await;
+    // 兜底去重：同一人同一 item 本轮最多提醒一次（防并发竞态产生的重复行导致翻倍）。
+    let mut sent: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
     for row in rows {
         let anchor = row.last_reminded_ms.unwrap_or(row.pending_since_ms);
         if business_seconds(anchor, now) < REMIND_INTERVAL_SECS {
+            continue;
+        }
+        if !sent.insert((row.open_id.clone(), row.number)) {
+            // 同一人+同一 item 本轮已提醒过，跳过重复行
+            store::set_reminded(state, &row.record_id, now).await;
             continue;
         }
         let card = cards::sla_reminder_card(&row.kind, row.number, &row.title, &row.url, &row.role);
