@@ -79,6 +79,10 @@ pub enum IssueEvent {
         issue: IssueInfo,
         assignee_login: String,
     },
+    Unassigned {
+        issue: IssueInfo,
+        assignee_login: String,
+    },
     Ignored,
 }
 
@@ -101,6 +105,13 @@ impl IssuesPayload {
             "reopened" => IssueEvent::Reopened(self.info()),
             "assigned" => match &self.assignee {
                 Some(a) => IssueEvent::Assigned {
+                    issue: self.info(),
+                    assignee_login: a.login.clone(),
+                },
+                None => IssueEvent::Ignored,
+            },
+            "unassigned" => match &self.assignee {
+                Some(a) => IssueEvent::Unassigned {
                     issue: self.info(),
                     assignee_login: a.login.clone(),
                 },

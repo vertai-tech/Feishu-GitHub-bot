@@ -131,6 +131,11 @@ pub enum PrEvent {
         pr: PrInfo,
         assignee_login: String,
     },
+    /// 取消受理人
+    Unassigned {
+        pr: PrInfo,
+        assignee_login: String,
+    },
     /// PR 关闭（merged 区分是否已合并）
     Closed(PrInfo),
     /// 草案转为正式（ready_for_review）
@@ -175,6 +180,13 @@ impl PullRequestPayload {
             },
             "assigned" => match &self.assignee {
                 Some(a) => PrEvent::Assigned {
+                    pr: self.pr_info(),
+                    assignee_login: a.login.clone(),
+                },
+                None => PrEvent::Ignored,
+            },
+            "unassigned" => match &self.assignee {
+                Some(a) => PrEvent::Unassigned {
                     pr: self.pr_info(),
                     assignee_login: a.login.clone(),
                 },

@@ -1,6 +1,6 @@
 //! HTTP 入口与事件编排：把 GitHub 事件翻译成飞书动作，处理飞书卡片回调。
 
-use crate::cards::{binding_card, comment_card, issue_card, pr_card, pr_review_card, IssueCardStatus, PrCardStatus};
+use crate::cards::{binding_card, comment_card, issue_card, pr_card, pr_review_card, unassigned_card, IssueCardStatus, PrCardStatus};
 use crate::feishu::callback::{self, Callback};
 use crate::github::events::{PrEvent, PrInfo, PullRequestPayload, ReviewInfo, ReviewPayload};
 use crate::github::issues::{CommentInfo, IssueEvent, IssuesPayload, IssueCommentPayload};
@@ -161,6 +161,11 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             .await;
             track_pending(state, &issue.repo_full_name, issue.number, &issue.title, &issue.url, false, &assignee_login, "受理人").await;
         }
+        IssueEvent::Unassigned { issue, assignee_login } => {
+            store::mark_done(state, &issue.repo_full_name, issue.number, &assignee_login).await;
+            let card = unassigned_card(false, &issue.repo_full_name, issue.number, &issue.title, &issue.url);
+            notify_person_private(state, &assignee_login, &card).await;
+        }
         IssueEvent::Closed(issue) => {
             store::mark_all_done(state, &issue.repo_full_name, issue.number).await;
             let card = issue_card(&issue, IssueCardStatus::Closed);
@@ -234,6 +239,11 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             )
             .await;
             track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, &assignee_login, "受理人").await;
+        }
+        PrEvent::Unassigned { pr, assignee_login } => {
+            store::mark_done(state, &pr.repo_full_name, pr.number, &assignee_login).await;
+            let card = unassigned_card(true, &pr.repo_full_name, pr.number, &pr.title, &pr.url);
+            notify_person_private(state, &assignee_login, &card).await;
         }
         PrEvent::ReviewRequested { pr, reviewer_login } => {
             handle_review_requested(state, &pr, &reviewer_login).await?;
@@ -379,6 +389,19 @@ async fn handle_review_submitted(state: &AppState, review: ReviewInfo) -> anyhow
         review.pr.repo_full_name, review.pr.number, review.state
     );
     Ok(())
+}
+
+/// 私聊某人（若已绑定）一张卡片；未绑定则静默跳过（不发群）。
+async fn notify_person_private(state: &AppState, login: &str, card: &serde_json::Value) {
+    let cfg = &state.cfg.feishu;
+    if let Ok(Some(open_id)) =
+        binding::lookup_open_id(&state.feishu, &cfg.base_app_token, &cfg.binding_table_id, login)
+            .await
+    {
+        if let Err(e) = state.feishu.send_card("open_id", &open_id, card).await {
+            warn!("私聊 {login} 卡片失败: {e:#}");
+        }
+    }
 }
 
 /// 若该负责人已绑定飞书，则登记一条 SLA 待办跟踪（用于未处理提醒）。

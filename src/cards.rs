@@ -233,6 +233,33 @@ pub fn pr_review_card(pr: &PrInfo, reviewer: &str, state: &str) -> Value {
     )
 }
 
+/// 取消受理通知卡片（私聊被移除的受理人）。
+pub fn unassigned_card(is_pr: bool, repo: &str, number: u64, title: &str, url: &str) -> Value {
+    let t = if is_pr { "Pull Request" } else { "Issue" };
+    json!({
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "title": { "tag": "plain_text", "content": format!("{t} 受理变更") },
+            "template": "grey"
+        },
+        "elements": [
+            { "tag": "div", "text": { "tag": "lark_md", "content": format!("**您已不是该 {t} 的受理人**") } },
+            { "tag": "div", "text": { "tag": "lark_md", "content": format!("**#{number} {title}**\n仓库：`{repo}`") } },
+            { "tag": "hr" },
+            {
+                "tag": "action",
+                "actions": [{
+                    "tag": "button",
+                    "text": { "tag": "plain_text", "content": format!("查看 {t}") },
+                    "type": "default",
+                    "url": url
+                }]
+            },
+            { "tag": "note", "elements": [{ "tag": "plain_text", "content": "来自 GitHub" }] }
+        ]
+    })
+}
+
 /// SLA 未处理提醒卡片（私聊负责人）。kind 为 "pr" / "issue"。
 pub fn sla_reminder_card(kind: &str, number: u64, title: &str, url: &str, role: &str) -> Value {
     let is_pr = kind == "pr";
