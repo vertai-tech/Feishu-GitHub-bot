@@ -156,7 +156,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = issue_card(&issue, IssueCardStatus::Opened);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                std::slice::from_ref(&assignee_login), &card, None, false,
+                std::slice::from_ref(&assignee_login), &card, false,
             )
             .await;
             track_pending(state, &issue.repo_full_name, issue.number, &issue.title, &issue.url, false, &assignee_login, "受理人").await;
@@ -172,7 +172,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = updated_card(false, &issue.repo_full_name, issue.number, &issue.title, &issue.url);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &others, &card, None, false,
+                &others, &card, false,
             )
             .await;
         }
@@ -181,7 +181,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = issue_card(&issue, IssueCardStatus::Closed);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, None, false,
+                &issue.assignees, &card, false,
             )
             .await;
         }
@@ -194,7 +194,7 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             let card = issue_card(&issue, IssueCardStatus::Reopened);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, None, false,
+                &issue.assignees, &card, false,
             )
             .await;
             // 重新打开 → 对受理人重启 SLA 计时。
@@ -220,7 +220,7 @@ async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Resul
         let card = comment_card(&c, "Pull Request 新评论", "您的 Pull Request 有新评论");
         deliver_to_assignees(
             state, &c.repo_full_name, c.issue_number, true, "创建者",
-            std::slice::from_ref(&c.author), &card, None, false,
+            std::slice::from_ref(&c.author), &card, false,
         )
         .await;
     } else {
@@ -236,7 +236,7 @@ async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Resul
         let card = comment_card(&c, "Issue 新评论", "您受理的 Issue 有一条新评论待处理");
         deliver_to_assignees(
             state, &c.repo_full_name, c.issue_number, false, "受理人",
-            &recipients, &card, None, admin_fb,
+            &recipients, &card, admin_fb,
         )
         .await;
     }
@@ -254,7 +254,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             let card = pr_card(&pr, PrCardStatus::Open, "您有一条 Pull Request 待处理");
             deliver_to_assignees(
                 state, &pr.repo_full_name, pr.number, true, "受理人",
-                std::slice::from_ref(&assignee_login), &card, None, false,
+                std::slice::from_ref(&assignee_login), &card, false,
             )
             .await;
             track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, &assignee_login, "受理人").await;
@@ -271,7 +271,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             let card = updated_card(true, &pr.repo_full_name, pr.number, &pr.title, &pr.url);
             deliver_to_assignees(
                 state, &pr.repo_full_name, pr.number, true, "受理人",
-                &others, &card, None, false,
+                &others, &card, false,
             )
             .await;
         }
@@ -301,14 +301,14 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
                 let card = pr_card(&pr, PrCardStatus::Closed, "您的 Pull Request 已转为草案");
                 deliver_to_assignees(
                     state, &pr.repo_full_name, pr.number, true, "创建者",
-                    std::slice::from_ref(&pr.author), &card, None, false,
+                    std::slice::from_ref(&pr.author), &card, false,
                 )
                 .await;
             } else {
                 let card = pr_card(&pr, PrCardStatus::Closed, "Pull Request 已转为草案，暂缓处理");
                 deliver_to_assignees(
                     state, &pr.repo_full_name, pr.number, true, "受理人",
-                    &pr.assignees, &card, None, false,
+                    &pr.assignees, &card, false,
                 )
                 .await;
             }
@@ -323,8 +323,7 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
 
 /// 把卡片投递给受理人（不自动建任务，收件人可用卡片上的「添加到任务」自行创建）：
 /// - 无受理人 → 视 admin_fallback 回退发给管理员/群；
-/// - 受理人未绑定 / 发送失败 → 回退提示管理员/群；
-/// - dedup_kind=Some 时按 (item+受理人+kind) 去重（opened 与 assigned 不重复）。
+/// - 受理人未绑定 / 发送失败 → 回退提示管理员/群。
 #[allow(clippy::too_many_arguments)]
 async fn deliver_to_assignees(
     state: &AppState,
@@ -334,7 +333,6 @@ async fn deliver_to_assignees(
     role: &str,
     assignees: &[String],
     card: &serde_json::Value,
-    dedup_kind: Option<&str>,
     admin_fallback: bool,
 ) {
     let cfg = &state.cfg.feishu;
@@ -356,12 +354,6 @@ async fn deliver_to_assignees(
     }
 
     for login in assignees {
-        if let Some(kind) = dedup_kind {
-            let key = format!("assignee:{repo}#{number}:{login}:{kind}");
-            if !state.mark_delivery(&key) {
-                continue;
-            }
-        }
         match binding::lookup_open_id(&state.feishu, &cfg.base_app_token, &cfg.binding_table_id, login)
             .await
         {
@@ -405,7 +397,6 @@ async fn handle_review_submitted(state: &AppState, review: ReviewInfo) -> anyhow
         "创建者",
         std::slice::from_ref(&review.pr.author),
         &card,
-        None,
         false,
     )
     .await;
@@ -436,14 +427,14 @@ async fn notify_pr_actionable(state: &AppState, pr: &PrInfo, assignee_lead: &str
         let card = pr_card(pr, PrCardStatus::Open, author_lead);
         deliver_to_assignees(
             state, &pr.repo_full_name, pr.number, true, "创建者",
-            std::slice::from_ref(&pr.author), &card, None, false,
+            std::slice::from_ref(&pr.author), &card, false,
         )
         .await;
     } else {
         let card = pr_card(pr, PrCardStatus::Open, assignee_lead);
         deliver_to_assignees(
             state, &pr.repo_full_name, pr.number, true, "受理人",
-            &pr.assignees, &card, None, false,
+            &pr.assignees, &card, false,
         )
         .await;
         for login in &pr.assignees {
@@ -531,7 +522,7 @@ async fn handle_closed(state: &AppState, pr: &PrInfo) -> anyhow::Result<()> {
     let author_card = pr_card(pr, status, author_lead);
     deliver_to_assignees(
         state, &pr.repo_full_name, pr.number, true, "创建者",
-        std::slice::from_ref(&pr.author), &author_card, None, false,
+        std::slice::from_ref(&pr.author), &author_card, false,
     )
     .await;
 
@@ -545,7 +536,7 @@ async fn handle_closed(state: &AppState, pr: &PrInfo) -> anyhow::Result<()> {
     let card = pr_card(pr, status, lead);
     deliver_to_assignees(
         state, &pr.repo_full_name, pr.number, true, "受理人",
-        &others, &card, None, false,
+        &others, &card, false,
     )
     .await;
     info!("PR {} 收尾完成（{status_str}）", store::pr_key(&pr.repo_full_name, pr.number));

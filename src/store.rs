@@ -197,10 +197,16 @@ pub async fn list_pending(state: &AppState) -> Vec<PendingRow> {
             return vec![];
         }
     };
+    // 并发 upsert 竞态可能给同一 (item, 负责人) 留下多行，按复合键去重，只调度一行。
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     recs.into_iter()
         .filter_map(|rec| {
             let open_id = rec.fields.get(F_OPEN_ID).and_then(field_str)?;
             if open_id.is_empty() {
+                return None;
+            }
+            let key = rec.fields.get(F_KEY).and_then(field_str).unwrap_or_default();
+            if !key.is_empty() && !seen.insert(key) {
                 return None;
             }
             Some(PendingRow {
