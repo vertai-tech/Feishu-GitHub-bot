@@ -197,6 +197,10 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
                 &issue.assignees, &card, None, false,
             )
             .await;
+            // 重新打开 → 对受理人重启 SLA 计时。
+            for login in &issue.assignees {
+                track_pending(state, &issue.repo_full_name, issue.number, &issue.title, &issue.url, false, login, "受理人").await;
+            }
         }
         IssueEvent::Ignored => {}
     }
@@ -275,25 +279,20 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
             handle_review_requested(state, &pr, &reviewer_login).await?;
         }
         PrEvent::ReadyForReview(pr) => {
-            // 草案转正式。有受理人→通知受理人并（重新）开始 SLA；无受理人→私聊作者。
-            if pr.assignees.is_empty() {
-                let card = pr_card(&pr, PrCardStatus::Open, "您的 Pull Request 已就绪（草案转正式）");
-                deliver_to_assignees(
-                    state, &pr.repo_full_name, pr.number, true, "创建者",
-                    std::slice::from_ref(&pr.author), &card, None, false,
-                )
-                .await;
-            } else {
-                let card = pr_card(&pr, PrCardStatus::Open, "Pull Request 已就绪（草案转正式），待处理");
-                deliver_to_assignees(
-                    state, &pr.repo_full_name, pr.number, true, "受理人",
-                    &pr.assignees, &card, None, false,
-                )
-                .await;
-                for login in &pr.assignees {
-                    track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, login, "受理人").await;
-                }
-            }
+            notify_pr_actionable(
+                state, &pr,
+                "Pull Request 已就绪（草案转正式），待处理",
+                "您的 Pull Request 已就绪（草案转正式）",
+            )
+            .await;
+        }
+        PrEvent::Reopened(pr) => {
+            notify_pr_actionable(
+                state, &pr,
+                "Pull Request 已重新打开，待处理",
+                "您的 Pull Request 已重新打开",
+            )
+            .await;
         }
         PrEvent::ConvertedToDraft(pr) => {
             // 转为草案：暂停 SLA。有受理人→通知受理人暂缓；无受理人→私聊作者。
@@ -426,6 +425,29 @@ async fn notify_person_private(state: &AppState, login: &str, card: &serde_json:
     {
         if let Err(e) = state.feishu.send_card("open_id", &open_id, card).await {
             warn!("私聊 {login} 卡片失败: {e:#}");
+        }
+    }
+}
+
+/// PR 变为「可处理」（就绪 / 重新打开）时的通知：
+/// 有受理人→通知受理人并重启 SLA；无受理人→私聊作者。
+async fn notify_pr_actionable(state: &AppState, pr: &PrInfo, assignee_lead: &str, author_lead: &str) {
+    if pr.assignees.is_empty() {
+        let card = pr_card(pr, PrCardStatus::Open, author_lead);
+        deliver_to_assignees(
+            state, &pr.repo_full_name, pr.number, true, "创建者",
+            std::slice::from_ref(&pr.author), &card, None, false,
+        )
+        .await;
+    } else {
+        let card = pr_card(pr, PrCardStatus::Open, assignee_lead);
+        deliver_to_assignees(
+            state, &pr.repo_full_name, pr.number, true, "受理人",
+            &pr.assignees, &card, None, false,
+        )
+        .await;
+        for login in &pr.assignees {
+            track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, login, "受理人").await;
         }
     }
 }

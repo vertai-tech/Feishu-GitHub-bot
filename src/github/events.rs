@@ -157,6 +157,8 @@ pub enum PrEvent {
     },
     /// PR 关闭（merged 区分是否已合并）
     Closed(PrInfo),
+    /// PR 重新打开
+    Reopened(PrInfo),
     /// 草案转为正式（ready_for_review）
     ReadyForReview(PrInfo),
     /// 转为草案（converted_to_draft）
@@ -212,6 +214,7 @@ impl PullRequestPayload {
                 None => PrEvent::Ignored,
             },
             "closed" => PrEvent::Closed(self.pr_info()),
+            "reopened" => PrEvent::Reopened(self.pr_info()),
             "ready_for_review" => PrEvent::ReadyForReview(self.pr_info()),
             "converted_to_draft" => PrEvent::ConvertedToDraft(self.pr_info()),
             // 仅正文(body)变化才通知
