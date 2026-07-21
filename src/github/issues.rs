@@ -93,6 +93,8 @@ pub enum IssueEvent {
         issue: IssueInfo,
         editor_login: String,
     },
+    /// 被删除 / 转移 → 停止跟踪
+    Removed(IssueInfo),
     Ignored,
 }
 
@@ -112,6 +114,7 @@ impl IssuesPayload {
         match self.action.as_str() {
             "opened" => IssueEvent::Opened(self.info()),
             "closed" => IssueEvent::Closed(self.info()),
+            "deleted" | "transferred" => IssueEvent::Removed(self.info()),
             "reopened" => IssueEvent::Reopened(self.info()),
             "assigned" => match &self.assignee {
                 Some(a) => IssueEvent::Assigned {

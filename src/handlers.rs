@@ -185,6 +185,11 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
             )
             .await;
         }
+        IssueEvent::Removed(issue) => {
+            // 删除/转移 → 停止 SLA 跟踪，不发通知。
+            store::mark_all_done(state, &issue.repo_full_name, issue.number).await;
+            info!("Issue 删除/转移，停止跟踪：{}#{}", issue.repo_full_name, issue.number);
+        }
         IssueEvent::Reopened(issue) => {
             let card = issue_card(&issue, IssueCardStatus::Reopened);
             deliver_to_assignees(
