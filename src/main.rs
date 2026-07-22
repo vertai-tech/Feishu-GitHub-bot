@@ -4,6 +4,7 @@ mod config;
 mod feishu;
 mod github;
 mod handlers;
+mod sla;
 mod state;
 mod store;
 
@@ -51,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
 
     let listen_addr = cfg.listen_addr.clone();
     let state = AppState::new(cfg);
+
+    // 启动 SLA 未处理提醒后台调度。
+    sla::spawn(state.clone());
 
     let app = Router::new()
         .route("/health", get(handlers::health))

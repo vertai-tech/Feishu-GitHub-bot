@@ -1,9 +1,10 @@
 //! HTTP 入口与事件编排：把 GitHub 事件翻译成飞书动作，处理飞书卡片回调。
 
-use crate::cards::{binding_card, comment_card, issue_card, pr_card, pr_review_card, IssueCardStatus, PrCardStatus};
+use crate::cards::{binding_card, comment_card, issue_card, pr_card, pr_review_card, unassigned_card, updated_card, IssueCardStatus, PrCardStatus};
 use crate::feishu::callback::{self, Callback};
 use crate::github::events::{PrEvent, PrInfo, PullRequestPayload, ReviewInfo, ReviewPayload};
 use crate::github::issues::{CommentInfo, IssueEvent, IssuesPayload, IssueCommentPayload};
+use crate::github::workflow::{CiEvent, CiInfo, WorkflowRunPayload};
 use crate::github::verify::verify_signature;
 use crate::state::AppState;
 use crate::{binding, store};
@@ -109,6 +110,24 @@ pub async fn github_webhook(
                 });
             }
         }
+        "workflow_run" => {
+            let payload: WorkflowRunPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("解析 workflow_run payload 失败: {e}");
+                    return StatusCode::BAD_REQUEST;
+                }
+            };
+            if !in_org(&state.cfg.github.org, &payload.repository.full_name) {
+                return StatusCode::OK;
+            }
+            let ev = payload.classify();
+            tokio::spawn(async move {
+                if let Err(e) = handle_workflow_run(&state, ev).await {
+                    error!("处理 workflow_run 事件失败: {e:#}");
+                }
+            });
+        }
         "pull_request_review" => {
             let payload: ReviewPayload = match serde_json::from_slice(&body) {
                 Ok(p) => p,
@@ -149,44 +168,58 @@ fn in_org(org: &str, full_name: &str) -> bool {
 async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Result<()> {
     match event {
         IssueEvent::Opened(issue) => {
-            let card = issue_card(&issue, IssueCardStatus::Opened);
-            let task = Some((
-                format!("处理 Issue #{}: {}", issue.number, issue.title),
-                format!("{}\n{}", issue.repo_full_name, issue.url),
-            ));
-            deliver_to_assignees(
-                state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, task, Some("assign"), true,
-            )
-            .await;
+            // 开单本身不通知；受理人由 assigned 事件负责（GitHub 开单带受理人时也会发 assigned）。
+            info!("Issue opened：{}#{}", issue.repo_full_name, issue.number);
         }
         IssueEvent::Assigned { issue, assignee_login } => {
             let card = issue_card(&issue, IssueCardStatus::Opened);
-            let task = Some((
-                format!("处理 Issue #{}: {}", issue.number, issue.title),
-                format!("{}\n{}", issue.repo_full_name, issue.url),
-            ));
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                std::slice::from_ref(&assignee_login), &card, task, Some("assign"), true,
+                std::slice::from_ref(&assignee_login), &card, false,
+            )
+            .await;
+            track_pending(state, &issue.repo_full_name, issue.number, &issue.title, &issue.url, false, &assignee_login, "受理人").await;
+        }
+        IssueEvent::Unassigned { issue, assignee_login } => {
+            store::mark_done(state, &issue.repo_full_name, issue.number, &assignee_login).await;
+            let card = unassigned_card(false, &issue.repo_full_name, issue.number, &issue.title, &issue.url);
+            notify_person_private(state, &assignee_login, &card).await;
+        }
+        IssueEvent::Edited { issue, editor_login } => {
+            store::reset_pending_on_activity(state, &issue.repo_full_name, issue.number, &editor_login).await;
+            let others: Vec<String> = issue.assignees.iter().filter(|a| **a != editor_login).cloned().collect();
+            let card = updated_card(false, &issue.repo_full_name, issue.number, &issue.title, &issue.url);
+            deliver_to_assignees(
+                state, &issue.repo_full_name, issue.number, false, "受理人",
+                &others, &card, false,
             )
             .await;
         }
         IssueEvent::Closed(issue) => {
+            store::mark_all_done(state, &issue.repo_full_name, issue.number).await;
             let card = issue_card(&issue, IssueCardStatus::Closed);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, None, None, false,
+                &issue.assignees, &card, false,
             )
             .await;
+        }
+        IssueEvent::Removed(issue) => {
+            // 删除/转移 → 停止 SLA 跟踪，不发通知。
+            store::mark_all_done(state, &issue.repo_full_name, issue.number).await;
+            info!("Issue 删除/转移，停止跟踪：{}#{}", issue.repo_full_name, issue.number);
         }
         IssueEvent::Reopened(issue) => {
             let card = issue_card(&issue, IssueCardStatus::Reopened);
             deliver_to_assignees(
                 state, &issue.repo_full_name, issue.number, false, "受理人",
-                &issue.assignees, &card, None, None, false,
+                &issue.assignees, &card, false,
             )
             .await;
+            // 重新打开 → 对受理人重启 SLA 计时。
+            for login in &issue.assignees {
+                track_pending(state, &issue.repo_full_name, issue.number, &issue.title, &issue.url, false, login, "受理人").await;
+            }
         }
         IssueEvent::Ignored => {}
     }
@@ -194,16 +227,19 @@ async fn handle_issue_event(state: &AppState, event: IssueEvent) -> anyhow::Resu
 }
 
 async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Result<()> {
+    // SLA：评论人若是负责人→其行 done；否则该项 pending 行重新计时。
+    store::reset_pending_on_activity(state, &c.repo_full_name, c.issue_number, &c.commenter).await;
+
     if c.is_pr {
         // PR 评论 → 通知 PR 作者本人；作者评论自己的 PR 则跳过。
         if c.commenter == c.author {
             info!("PR 作者评论自己的 PR，跳过：{}#{}", c.repo_full_name, c.issue_number);
             return Ok(());
         }
-        let card = comment_card(&c, "PR 新评论", "您的 PR 有新评论");
+        let card = comment_card(&c, "Pull Request 新评论", "您的 Pull Request 有新评论");
         deliver_to_assignees(
             state, &c.repo_full_name, c.issue_number, true, "创建者",
-            std::slice::from_ref(&c.author), &card, None, None, false,
+            std::slice::from_ref(&c.author), &card, false,
         )
         .await;
     } else {
@@ -219,7 +255,7 @@ async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Resul
         let card = comment_card(&c, "Issue 新评论", "您受理的 Issue 有一条新评论待处理");
         deliver_to_assignees(
             state, &c.repo_full_name, c.issue_number, false, "受理人",
-            &recipients, &card, None, None, admin_fb,
+            &recipients, &card, admin_fb,
         )
         .await;
     }
@@ -228,41 +264,73 @@ async fn handle_issue_comment(state: &AppState, c: CommentInfo) -> anyhow::Resul
 }
 
 async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()> {
-    let cfg = &state.cfg.feishu;
     match event {
         PrEvent::Opened(pr) => {
-            // 登记跟踪（供 closed 完成任务）。message_id 留空：不再固定抄送管理员。
-            store::record_opened(
-                &state.feishu, &cfg.base_app_token, &cfg.pr_table_id,
-                &pr.repo_full_name, pr.number, &pr.title, "",
-            )
-            .await?;
-            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 PR 待处理");
-            let task = Some((
-                format!("处理 PR #{}: {}", pr.number, pr.title),
-                format!("{}\n{}", pr.repo_full_name, pr.url),
-            ));
-            deliver_to_assignees(
-                state, &pr.repo_full_name, pr.number, true, "受理人",
-                &pr.assignees, &card, task, Some("assign"), true,
-            )
-            .await;
-            info!("PR opened 处理完成：{}", store::pr_key(&pr.repo_full_name, pr.number));
+            // 开单本身不通知；受理人由 assigned 事件负责。
+            info!("PR opened：{}#{}", pr.repo_full_name, pr.number);
         }
         PrEvent::Assigned { pr, assignee_login } => {
-            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 PR 待处理");
-            let task = Some((
-                format!("处理 PR #{}: {}", pr.number, pr.title),
-                format!("{}\n{}", pr.repo_full_name, pr.url),
-            ));
+            let card = pr_card(&pr, PrCardStatus::Open, "您有一条 Pull Request 待处理");
             deliver_to_assignees(
                 state, &pr.repo_full_name, pr.number, true, "受理人",
-                std::slice::from_ref(&assignee_login), &card, task, Some("assign"), true,
+                std::slice::from_ref(&assignee_login), &card, false,
+            )
+            .await;
+            track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, &assignee_login, "受理人").await;
+        }
+        PrEvent::Unassigned { pr, assignee_login } => {
+            store::mark_done(state, &pr.repo_full_name, pr.number, &assignee_login).await;
+            let card = unassigned_card(true, &pr.repo_full_name, pr.number, &pr.title, &pr.url);
+            notify_person_private(state, &assignee_login, &card).await;
+        }
+        PrEvent::Edited { pr, editor_login } => {
+            // 正文更新：编辑者本人的行 done，其余受理人重新计时并私聊提示更新。
+            store::reset_pending_on_activity(state, &pr.repo_full_name, pr.number, &editor_login).await;
+            let others: Vec<String> = pr.assignees.iter().filter(|a| **a != editor_login).cloned().collect();
+            let card = updated_card(true, &pr.repo_full_name, pr.number, &pr.title, &pr.url);
+            deliver_to_assignees(
+                state, &pr.repo_full_name, pr.number, true, "受理人",
+                &others, &card, false,
             )
             .await;
         }
         PrEvent::ReviewRequested { pr, reviewer_login } => {
             handle_review_requested(state, &pr, &reviewer_login).await?;
+        }
+        PrEvent::ReadyForReview(pr) => {
+            notify_pr_actionable(
+                state, &pr,
+                "Pull Request 已就绪（草案转正式），待处理",
+                "您的 Pull Request 已就绪（草案转正式）",
+            )
+            .await;
+        }
+        PrEvent::Reopened(pr) => {
+            notify_pr_actionable(
+                state, &pr,
+                "Pull Request 已重新打开，待处理",
+                "您的 Pull Request 已重新打开",
+            )
+            .await;
+        }
+        PrEvent::ConvertedToDraft(pr) => {
+            // 转为草案：暂停 SLA。有受理人→通知受理人暂缓；无受理人→私聊作者。
+            store::mark_all_done(state, &pr.repo_full_name, pr.number).await;
+            if pr.assignees.is_empty() {
+                let card = pr_card(&pr, PrCardStatus::Closed, "您的 Pull Request 已转为草案");
+                deliver_to_assignees(
+                    state, &pr.repo_full_name, pr.number, true, "创建者",
+                    std::slice::from_ref(&pr.author), &card, false,
+                )
+                .await;
+            } else {
+                let card = pr_card(&pr, PrCardStatus::Closed, "Pull Request 已转为草案，暂缓处理");
+                deliver_to_assignees(
+                    state, &pr.repo_full_name, pr.number, true, "受理人",
+                    &pr.assignees, &card, false,
+                )
+                .await;
+            }
         }
         PrEvent::Closed(pr) => {
             handle_closed(state, &pr).await?;
@@ -272,11 +340,9 @@ async fn handle_pr_event(state: &AppState, event: PrEvent) -> anyhow::Result<()>
     Ok(())
 }
 
-/// 把卡片投递给受理人：
-/// - 无受理人 → 回退发给管理员；
-/// - 受理人未绑定 / 发送失败 → 回退提示管理员；
-/// - task=Some 时给绑定的受理人建任务（is_pr 时把 guid 记入 PR 跟踪表）；
-/// - dedup_kind=Some 时按 (item+受理人+kind) 去重（opened 与 assigned 不重复）。
+/// 把卡片投递给受理人（不自动建任务，收件人可用卡片上的「添加到任务」自行创建）：
+/// - 无受理人 → 视 admin_fallback 回退发给管理员/群；
+/// - 受理人未绑定 / 发送失败 → 回退提示管理员/群。
 #[allow(clippy::too_many_arguments)]
 async fn deliver_to_assignees(
     state: &AppState,
@@ -286,17 +352,15 @@ async fn deliver_to_assignees(
     role: &str,
     assignees: &[String],
     card: &serde_json::Value,
-    task: Option<(String, String)>,
-    dedup_kind: Option<&str>,
     admin_fallback: bool,
 ) {
     let cfg = &state.cfg.feishu;
-    let label = if is_pr { "PR" } else { "Issue" };
+    let label = if is_pr { "Pull Request" } else { "Issue" };
 
     // 无收件人 → 视需要回退给管理员（带显著"管理员通知"标识）。
     if assignees.is_empty() {
         if admin_fallback {
-            let notice = crate::cards::to_admin_notice(card);
+            let notice = crate::cards::to_broadcast_notice(card);
             if let Err(e) = state
                 .feishu
                 .send_card(&cfg.notify_id_type, &cfg.notify_id, &notice)
@@ -309,12 +373,6 @@ async fn deliver_to_assignees(
     }
 
     for login in assignees {
-        if let Some(kind) = dedup_kind {
-            let key = format!("assignee:{repo}#{number}:{login}:{kind}");
-            if !state.mark_delivery(&key) {
-                continue;
-            }
-        }
         match binding::lookup_open_id(&state.feishu, &cfg.base_app_token, &cfg.binding_table_id, login)
             .await
         {
@@ -328,23 +386,7 @@ async fn deliver_to_assignees(
                     warn!("通知{label}{role} {login} 失败，已回退管理员: {e:#}");
                     continue;
                 }
-                if let Some((summary, description)) = &task {
-                    match state.feishu.create_task(summary, description, &open_id).await {
-                        Ok(guid) => {
-                            if is_pr {
-                                let _ = store::record_review_task(
-                                    &state.feishu, &cfg.base_app_token, &cfg.pr_table_id,
-                                    repo, number, login, &guid,
-                                )
-                                .await;
-                            }
-                            info!("已通知{label}{role} {login} 并建任务 {guid}");
-                        }
-                        Err(e) => warn!("给{label}{role} {login} 建任务失败: {e:#}"),
-                    }
-                } else {
-                    info!("已通知{label}{role} {login}");
-                }
+                info!("已通知{label}{role} {login}");
             }
             Ok(None) => {
                 let hint = format!(
@@ -363,6 +405,8 @@ async fn deliver_to_assignees(
 
 /// 审查者提交 review → 通知 PR 作者「审查已完成」。
 async fn handle_review_submitted(state: &AppState, review: ReviewInfo) -> anyhow::Result<()> {
+    // SLA：reviewer 提交了 review → 其待办行 done。
+    store::mark_done(state, &review.pr.repo_full_name, review.pr.number, &review.reviewer).await;
     let card = pr_review_card(&review.pr, &review.reviewer, &review.state);
     deliver_to_assignees(
         state,
@@ -372,8 +416,6 @@ async fn handle_review_submitted(state: &AppState, review: ReviewInfo) -> anyhow
         "创建者",
         std::slice::from_ref(&review.pr.author),
         &card,
-        None,
-        None,
         false,
     )
     .await;
@@ -382,6 +424,133 @@ async fn handle_review_submitted(state: &AppState, review: ReviewInfo) -> anyhow
         review.pr.repo_full_name, review.pr.number, review.state
     );
     Ok(())
+}
+
+/// 处理 GitHub Actions 运行完成：
+/// - 失败 → 私聊触发者（未绑定/失败 → 回退群提示）；
+/// - 成功 → 若为 ci_group_repo 指定的仓库则发到 ci_success_chat_id 群，否则私聊触发者。
+async fn handle_workflow_run(state: &AppState, event: CiEvent) -> anyhow::Result<()> {
+    let cfg = &state.cfg.feishu;
+    match event {
+        CiEvent::Failure(ci) => {
+            let card = crate::cards::ci_card(&ci, false);
+            notify_triggerer(state, &ci, &card, "失败").await;
+        }
+        CiEvent::Success(ci) => {
+            let card = crate::cards::ci_card(&ci, true);
+            let repo_short = ci.repo_full_name.rsplit('/').next().unwrap_or(&ci.repo_full_name);
+            if repo_short == cfg.ci_group_repo && !cfg.ci_success_chat_id.is_empty() {
+                if let Err(e) = state
+                    .feishu
+                    .send_card("chat_id", &cfg.ci_success_chat_id, &card)
+                    .await
+                {
+                    error!("CI 成功通知群 {} 失败: {e:#}", cfg.ci_success_chat_id);
+                }
+                info!("CI 成功已通知群：{}#{}", ci.repo_full_name, ci.workflow_name);
+            } else {
+                notify_triggerer(state, &ci, &card, "成功").await;
+            }
+        }
+        CiEvent::Ignored => {}
+    }
+    Ok(())
+}
+
+/// 私聊 CI 触发者；未绑定 / 发送失败 → 回退到默认群（oc_2abf…）发文字提示，避免丢失。
+async fn notify_triggerer(state: &AppState, ci: &CiInfo, card: &serde_json::Value, result: &str) {
+    let cfg = &state.cfg.feishu;
+    let fallback = |detail: String| async move {
+        let hint = format!(
+            "CI/CD {result}：{repo} 工作流「{wf}」（分支 `{branch}`），触发者 `{who}` {detail}\n{url}",
+            repo = ci.repo_full_name,
+            wf = ci.workflow_name,
+            branch = ci.branch,
+            who = ci.triggerer,
+            url = ci.url,
+        );
+        let _ = state
+            .feishu
+            .send_text(&cfg.notify_id_type, &cfg.notify_id, &hint)
+            .await;
+    };
+    if ci.triggerer.is_empty() {
+        fallback("无法识别（无触发者信息），已发到群".to_string()).await;
+        return;
+    }
+    match binding::lookup_open_id(&state.feishu, &cfg.base_app_token, &cfg.binding_table_id, &ci.triggerer)
+        .await
+    {
+        Ok(Some(open_id)) => {
+            if let Err(e) = state.feishu.send_card("open_id", &open_id, card).await {
+                warn!("CI 私聊触发者 {} 失败，回退群: {e:#}", ci.triggerer);
+                fallback(format!("私聊失败（{e}），已发到群")).await;
+                return;
+            }
+            info!("CI {result} 已私聊触发者 {}", ci.triggerer);
+        }
+        Ok(None) => {
+            fallback("尚未绑定飞书账号，无法私聊，已发到群".to_string()).await;
+            warn!("CI 触发者 {} 未绑定，已回退群", ci.triggerer);
+        }
+        Err(e) => error!("查询 CI 触发者 {} 绑定失败: {e:#}", ci.triggerer),
+    }
+}
+
+/// 私聊某人（若已绑定）一张卡片；未绑定则静默跳过（不发群）。
+async fn notify_person_private(state: &AppState, login: &str, card: &serde_json::Value) {
+    let cfg = &state.cfg.feishu;
+    if let Ok(Some(open_id)) =
+        binding::lookup_open_id(&state.feishu, &cfg.base_app_token, &cfg.binding_table_id, login)
+            .await
+    {
+        if let Err(e) = state.feishu.send_card("open_id", &open_id, card).await {
+            warn!("私聊 {login} 卡片失败: {e:#}");
+        }
+    }
+}
+
+/// PR 变为「可处理」（就绪 / 重新打开）时的通知：
+/// 有受理人→通知受理人并重启 SLA；无受理人→私聊作者。
+async fn notify_pr_actionable(state: &AppState, pr: &PrInfo, assignee_lead: &str, author_lead: &str) {
+    if pr.assignees.is_empty() {
+        let card = pr_card(pr, PrCardStatus::Open, author_lead);
+        deliver_to_assignees(
+            state, &pr.repo_full_name, pr.number, true, "创建者",
+            std::slice::from_ref(&pr.author), &card, false,
+        )
+        .await;
+    } else {
+        let card = pr_card(pr, PrCardStatus::Open, assignee_lead);
+        deliver_to_assignees(
+            state, &pr.repo_full_name, pr.number, true, "受理人",
+            &pr.assignees, &card, false,
+        )
+        .await;
+        for login in &pr.assignees {
+            track_pending(state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, login, "受理人").await;
+        }
+    }
+}
+
+/// 若该负责人已绑定飞书，则登记一条 SLA 待办跟踪（用于未处理提醒）。
+async fn track_pending(
+    state: &AppState,
+    repo: &str,
+    number: u64,
+    title: &str,
+    url: &str,
+    is_pr: bool,
+    login: &str,
+    role: &str,
+) {
+    let cfg = &state.cfg.feishu;
+    if let Ok(Some(open_id)) =
+        binding::lookup_open_id(&state.feishu, &cfg.base_app_token, &cfg.binding_table_id, login)
+            .await
+    {
+        store::upsert_pending(state, repo, number, title, url, is_pr, login, &open_id, role).await;
+    }
 }
 
 async fn handle_review_requested(
@@ -401,7 +570,7 @@ async fn handle_review_requested(
     let Some(open_id) = open_id else {
         // 未绑定：群里提示，仍不报错。
         let hint = format!(
-            "GitHub 用户 `{reviewer_login}` 被请求 review PR #{num}（{repo}），但还没绑定飞书账号，无法派任务。请该同学私聊我完成绑定。",
+            "GitHub 用户 `{reviewer_login}` 被请求 review Pull Request #{num}（{repo}），但还没绑定飞书账号，无法派任务。请该同学私聊我完成绑定。",
             num = pr.number,
             repo = pr.repo_full_name,
         );
@@ -413,73 +582,37 @@ async fn handle_review_requested(
         return Ok(());
     };
 
-    let summary = format!("Review PR #{}: {}", pr.number, pr.title);
-    let description = format!("{}\n{}", pr.repo_full_name, pr.url);
-    let task_guid = state
-        .feishu
-        .create_task(&summary, &description, &open_id)
-        .await?;
-
-    // 私聊推一张卡片。
-    let card = pr_card(pr, PrCardStatus::Open, "您有一条 PR 待 Review");
+    // 私聊推一张卡片（不自动建任务；可点卡片上的「添加到任务」）。
+    let card = pr_card(pr, PrCardStatus::Open, "您有一条 Pull Request 待 Review");
     if let Err(e) = state.feishu.send_card("open_id", &open_id, &card).await {
-        warn!("私聊 reviewer 卡片失败（任务已建）: {e:#}");
+        warn!("私聊 reviewer 卡片失败: {e:#}");
     }
-
-    store::record_review_task(
-        &state.feishu,
-        &cfg.base_app_token,
-        &cfg.pr_table_id,
-        &pr.repo_full_name,
-        pr.number,
-        reviewer_login,
-        &task_guid,
+    // 登记 SLA 待办（reviewer）。
+    store::upsert_pending(
+        state, &pr.repo_full_name, pr.number, &pr.title, &pr.url, true, reviewer_login, &open_id, "reviewer",
     )
-    .await?;
-    info!("已给 {reviewer_login} 建 review 任务 {task_guid}");
+    .await;
+    info!("已通知 reviewer {reviewer_login}");
     Ok(())
 }
 
 async fn handle_closed(state: &AppState, pr: &PrInfo) -> anyhow::Result<()> {
-    let cfg = &state.cfg.feishu;
     let (status, lead) = if pr.merged {
-        (PrCardStatus::Merged, "您跟进的 PR 已合并")
+        (PrCardStatus::Merged, "您跟进的 Pull Request 已合并")
     } else {
-        (PrCardStatus::Closed, "您跟进的 PR 已关闭")
+        (PrCardStatus::Closed, "您跟进的 Pull Request 已关闭")
     };
     let status_str = if pr.merged { "merged" } else { "closed" };
 
-    // 完成相关任务并更新跟踪状态。
-    if let Some(record) = store::get(
-        &state.feishu,
-        &cfg.base_app_token,
-        &cfg.pr_table_id,
-        &pr.repo_full_name,
-        pr.number,
-    )
-    .await?
-    {
-        for guid in &record.task_guids {
-            if let Err(e) = state.feishu.complete_task(guid).await {
-                warn!("完成任务 {guid} 失败: {e:#}");
-            }
-        }
-        let _ = store::set_status(
-            &state.feishu,
-            &cfg.base_app_token,
-            &cfg.pr_table_id,
-            &record.record_id,
-            status_str,
-        )
-        .await;
-    }
+    // SLA：关闭/合并 → 该 PR 所有待办跟踪行标记 done。
+    store::mark_all_done(state, &pr.repo_full_name, pr.number).await;
 
     // 通知 PR 作者：已合并/关闭。
-    let author_lead = if pr.merged { "您的 PR 已合并" } else { "您的 PR 已关闭" };
+    let author_lead = if pr.merged { "您的 Pull Request 已合并" } else { "您的 Pull Request 已关闭" };
     let author_card = pr_card(pr, status, author_lead);
     deliver_to_assignees(
         state, &pr.repo_full_name, pr.number, true, "创建者",
-        std::slice::from_ref(&pr.author), &author_card, None, None, false,
+        std::slice::from_ref(&pr.author), &author_card, false,
     )
     .await;
 
@@ -493,7 +626,7 @@ async fn handle_closed(state: &AppState, pr: &PrInfo) -> anyhow::Result<()> {
     let card = pr_card(pr, status, lead);
     deliver_to_assignees(
         state, &pr.repo_full_name, pr.number, true, "受理人",
-        &others, &card, None, None, false,
+        &others, &card, false,
     )
     .await;
     info!("PR {} 收尾完成（{status_str}）", store::pr_key(&pr.repo_full_name, pr.number));

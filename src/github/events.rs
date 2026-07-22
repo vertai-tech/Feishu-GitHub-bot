@@ -2,6 +2,14 @@
 
 use serde::Deserialize;
 
+/// edited 事件里判断是否改动了正文(body)。
+pub fn body_changed(changes: &Option<serde_json::Value>) -> bool {
+    changes
+        .as_ref()
+        .and_then(|c| c.get("body"))
+        .is_some()
+}
+
 /// 原始 payload（只取我们关心的字段）。
 #[derive(Debug, Deserialize)]
 pub struct PullRequestPayload {
@@ -15,6 +23,12 @@ pub struct PullRequestPayload {
     /// assigned 事件中被指派的受理人
     #[serde(default)]
     pub assignee: Option<User>,
+    /// 触发事件的操作者
+    #[serde(default)]
+    pub sender: Option<User>,
+    /// edited 事件的变更详情（含 body/title）
+    #[serde(default)]
+    pub changes: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,8 +145,24 @@ pub enum PrEvent {
         pr: PrInfo,
         assignee_login: String,
     },
+    /// 取消受理人
+    Unassigned {
+        pr: PrInfo,
+        assignee_login: String,
+    },
+    /// 正文被编辑
+    Edited {
+        pr: PrInfo,
+        editor_login: String,
+    },
     /// PR 关闭（merged 区分是否已合并）
     Closed(PrInfo),
+    /// PR 重新打开
+    Reopened(PrInfo),
+    /// 草案转为正式（ready_for_review）
+    ReadyForReview(PrInfo),
+    /// 转为草案（converted_to_draft）
+    ConvertedToDraft(PrInfo),
     /// 其它 action，忽略
     Ignored,
 }
@@ -176,7 +206,25 @@ impl PullRequestPayload {
                 },
                 None => PrEvent::Ignored,
             },
+            "unassigned" => match &self.assignee {
+                Some(a) => PrEvent::Unassigned {
+                    pr: self.pr_info(),
+                    assignee_login: a.login.clone(),
+                },
+                None => PrEvent::Ignored,
+            },
             "closed" => PrEvent::Closed(self.pr_info()),
+            "reopened" => PrEvent::Reopened(self.pr_info()),
+            "ready_for_review" => PrEvent::ReadyForReview(self.pr_info()),
+            "converted_to_draft" => PrEvent::ConvertedToDraft(self.pr_info()),
+            // 仅正文(body)变化才通知
+            "edited" if body_changed(&self.changes) => match &self.sender {
+                Some(s) => PrEvent::Edited {
+                    pr: self.pr_info(),
+                    editor_login: s.login.clone(),
+                },
+                None => PrEvent::Ignored,
+            },
             _ => PrEvent::Ignored,
         }
     }

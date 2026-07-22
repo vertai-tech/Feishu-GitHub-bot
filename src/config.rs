@@ -30,8 +30,14 @@ pub struct FeishuConfig {
     pub base_app_token: String,
     /// 绑定映射表 table_id
     pub binding_table_id: String,
-    /// PR 跟踪表 table_id
-    pub pr_table_id: String,
+    /// SLA「待办跟踪」表 table_id
+    pub sla_table_id: String,
+    /// CI/CD 成功通知的群 chat_id（仅 ci_group_repo 指定的仓库走此群）
+    #[serde(default = "default_ci_success_chat_id")]
+    pub ci_success_chat_id: String,
+    /// 成功通知进群的仓库名（比较仓库 full_name 的 `/` 后段）；其余仓库成功走私聊
+    #[serde(default = "default_ci_group_repo")]
+    pub ci_group_repo: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +55,14 @@ fn default_listen() -> String {
 
 fn default_receive_id_type() -> String {
     "union_id".to_string()
+}
+
+fn default_ci_success_chat_id() -> String {
+    "oc_a60b47a3aa25e364eefff7dafc6068d7".to_string()
+}
+
+fn default_ci_group_repo() -> String {
+    "fantap-mobile".to_string()
 }
 
 impl Config {
