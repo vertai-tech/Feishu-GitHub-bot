@@ -4,6 +4,7 @@ use crate::cards::{binding_card, comment_card, issue_card, pr_card, pr_review_ca
 use crate::feishu::callback::{self, Callback};
 use crate::github::events::{PrEvent, PrInfo, PullRequestPayload, ReviewInfo, ReviewPayload};
 use crate::github::issues::{CommentInfo, IssueEvent, IssuesPayload, IssueCommentPayload};
+use crate::github::workflow::{CiEvent, CiInfo, WorkflowRunPayload};
 use crate::github::verify::verify_signature;
 use crate::state::AppState;
 use crate::{binding, store};
@@ -108,6 +109,24 @@ pub async fn github_webhook(
                     }
                 });
             }
+        }
+        "workflow_run" => {
+            let payload: WorkflowRunPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("解析 workflow_run payload 失败: {e}");
+                    return StatusCode::BAD_REQUEST;
+                }
+            };
+            if !in_org(&state.cfg.github.org, &payload.repository.full_name) {
+                return StatusCode::OK;
+            }
+            let ev = payload.classify();
+            tokio::spawn(async move {
+                if let Err(e) = handle_workflow_run(&state, ev).await {
+                    error!("处理 workflow_run 事件失败: {e:#}");
+                }
+            });
         }
         "pull_request_review" => {
             let payload: ReviewPayload = match serde_json::from_slice(&body) {
@@ -405,6 +424,77 @@ async fn handle_review_submitted(state: &AppState, review: ReviewInfo) -> anyhow
         review.pr.repo_full_name, review.pr.number, review.state
     );
     Ok(())
+}
+
+/// 处理 GitHub Actions 运行完成：
+/// - 失败 → 私聊触发者（未绑定/失败 → 回退群提示）；
+/// - 成功 → 若为 ci_group_repo 指定的仓库则发到 ci_success_chat_id 群，否则私聊触发者。
+async fn handle_workflow_run(state: &AppState, event: CiEvent) -> anyhow::Result<()> {
+    let cfg = &state.cfg.feishu;
+    match event {
+        CiEvent::Failure(ci) => {
+            let card = crate::cards::ci_card(&ci, false);
+            notify_triggerer(state, &ci, &card, "失败").await;
+        }
+        CiEvent::Success(ci) => {
+            let card = crate::cards::ci_card(&ci, true);
+            let repo_short = ci.repo_full_name.rsplit('/').next().unwrap_or(&ci.repo_full_name);
+            if repo_short == cfg.ci_group_repo && !cfg.ci_success_chat_id.is_empty() {
+                if let Err(e) = state
+                    .feishu
+                    .send_card("chat_id", &cfg.ci_success_chat_id, &card)
+                    .await
+                {
+                    error!("CI 成功通知群 {} 失败: {e:#}", cfg.ci_success_chat_id);
+                }
+                info!("CI 成功已通知群：{}#{}", ci.repo_full_name, ci.workflow_name);
+            } else {
+                notify_triggerer(state, &ci, &card, "成功").await;
+            }
+        }
+        CiEvent::Ignored => {}
+    }
+    Ok(())
+}
+
+/// 私聊 CI 触发者；未绑定 / 发送失败 → 回退到默认群（oc_2abf…）发文字提示，避免丢失。
+async fn notify_triggerer(state: &AppState, ci: &CiInfo, card: &serde_json::Value, result: &str) {
+    let cfg = &state.cfg.feishu;
+    let fallback = |detail: String| async move {
+        let hint = format!(
+            "CI/CD {result}：{repo} 工作流「{wf}」（分支 `{branch}`），触发者 `{who}` {detail}\n{url}",
+            repo = ci.repo_full_name,
+            wf = ci.workflow_name,
+            branch = ci.branch,
+            who = ci.triggerer,
+            url = ci.url,
+        );
+        let _ = state
+            .feishu
+            .send_text(&cfg.notify_id_type, &cfg.notify_id, &hint)
+            .await;
+    };
+    if ci.triggerer.is_empty() {
+        fallback("无法识别（无触发者信息），已发到群".to_string()).await;
+        return;
+    }
+    match binding::lookup_open_id(&state.feishu, &cfg.base_app_token, &cfg.binding_table_id, &ci.triggerer)
+        .await
+    {
+        Ok(Some(open_id)) => {
+            if let Err(e) = state.feishu.send_card("open_id", &open_id, card).await {
+                warn!("CI 私聊触发者 {} 失败，回退群: {e:#}", ci.triggerer);
+                fallback(format!("私聊失败（{e}），已发到群")).await;
+                return;
+            }
+            info!("CI {result} 已私聊触发者 {}", ci.triggerer);
+        }
+        Ok(None) => {
+            fallback("尚未绑定飞书账号，无法私聊，已发到群".to_string()).await;
+            warn!("CI 触发者 {} 未绑定，已回退群", ci.triggerer);
+        }
+        Err(e) => error!("查询 CI 触发者 {} 绑定失败: {e:#}", ci.triggerer),
+    }
 }
 
 /// 私聊某人（若已绑定）一张卡片；未绑定则静默跳过（不发群）。

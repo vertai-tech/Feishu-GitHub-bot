@@ -5,6 +5,7 @@
 
 use crate::github::events::PrInfo;
 use crate::github::issues::{CommentInfo, IssueInfo};
+use crate::github::workflow::CiInfo;
 use serde_json::{json, Value};
 
 /// 两列短字段中的一格：`**标题**\n内容`。
@@ -298,6 +299,60 @@ pub fn sla_reminder_card(kind: &str, number: u64, title: &str, url: &str, role: 
     )
 }
 
+/// CI/CD 运行结果卡片。`success` 决定颜色与文案；无「添加到任务」按钮，仅「查看运行」跳转。
+pub fn ci_card(ci: &CiInfo, success: bool) -> Value {
+    let (template, header_title, lead) = if success {
+        ("green", "CI/CD 运行成功", "CI/CD 运行成功")
+    } else {
+        ("red", "CI/CD 运行失败", "CI/CD 运行失败，请及时处理")
+    };
+    let conclusion_text = match ci.conclusion.as_str() {
+        "success" => "成功",
+        "failure" => "失败",
+        "timed_out" => "超时",
+        other => other,
+    };
+    let mut elements = vec![
+        json!({ "tag": "div", "text": { "tag": "lark_md", "content": format!("**{lead}**") } }),
+    ];
+    if !ci.commit_title.is_empty() {
+        elements.push(json!({
+            "tag": "div",
+            "text": { "tag": "lark_md", "content": format!("**{}**", ci.commit_title) }
+        }));
+    }
+    elements.push(json!({
+        "tag": "div",
+        "fields": [
+            short_field("仓库", &format!("`{}`", ci.repo_full_name)),
+            short_field("工作流", &ci.workflow_name),
+            short_field("分支", &format!("`{}`", ci.branch)),
+            short_field("触发者", &ci.triggerer),
+            short_field("结论", conclusion_text),
+        ]
+    }));
+    elements.push(json!({ "tag": "hr" }));
+    elements.push(json!({
+        "tag": "action",
+        "actions": [{
+            "tag": "button",
+            "text": { "tag": "plain_text", "content": "查看运行" },
+            "type": if success { "default" } else { "primary" },
+            "url": ci.url
+        }]
+    }));
+    elements.push(footer("来自 GitHub Actions"));
+
+    json!({
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "title": { "tag": "plain_text", "content": header_title },
+            "template": template
+        },
+        "elements": elements
+    })
+}
+
 /// 把一张通知卡片包装成「待认领广播」（发到群里）：变色头 + 广播口吻，
 /// 面向全群而非某个人——用于无受理人时在群里公告。
 pub fn to_broadcast_notice(card: &Value) -> Value {
@@ -370,6 +425,20 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         ..comment.clone()
     };
 
+    let ci = CiInfo {
+        repo_full_name: "vertai-tech/fantap-mobile".into(),
+        workflow_name: "Build & Test".into(),
+        branch: "main".into(),
+        url: "https://github.com/vertai-tech/fantap-mobile/actions/runs/1".into(),
+        conclusion: "success".into(),
+        triggerer: "zhang-san".into(),
+        commit_title: "feat: 新增登录页".into(),
+    };
+    let ci_fail = CiInfo {
+        conclusion: "failure".into(),
+        ..ci.clone()
+    };
+
     vec![
         ("Issue 新建", issue_card(&issue, IssueCardStatus::Opened)),
         ("Issue 关闭", issue_card(&issue, IssueCardStatus::Closed)),
@@ -382,6 +451,8 @@ pub fn sample_cards() -> Vec<(&'static str, Value)> {
         ("PR 已合并", pr_card(&pr, PrCardStatus::Merged, "您的 PR 已合并")),
         ("PR 已关闭", pr_card(&pr, PrCardStatus::Closed, "您的 PR 已关闭")),
         ("待认领广播", to_broadcast_notice(&pr_card(&pr, PrCardStatus::Open, "有一条 PR 待处理"))),
+        ("CI/CD 成功", ci_card(&ci, true)),
+        ("CI/CD 失败", ci_card(&ci_fail, false)),
         ("绑定卡片", binding_card()),
     ]
 }
